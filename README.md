@@ -99,8 +99,9 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
   -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Spell the word cat backwards. Reply with only the result."}]}'
 ```
 
-Every Presidio entity type blocks, including names, places, dates and
-nationalities, and these often appear in the model's reasoning. For example,
+Every Presidio entity type blocks except `DATE_TIME` (a date or time isn't PII
+on its own). That includes names, places and nationalities, and these often
+appear in the model's reasoning. For example,
 "Write a haiku about the sea." is often blocked with `PII detected in model
 reasoning: NRP`, because the model reasons about haiku being Japanese. See
 [Configuration](#configuration) to narrow it.
@@ -156,7 +157,7 @@ The detection settings are in [`charts/litellm-guardrail/values.yaml`](charts/li
 ```yaml
 piiService:
   scoreThreshold: 0.4    # Presidio confidence needed to count as PII (0-1)
-  ignoredEntities: []    # entity types that never block, e.g. [LOCATION, DATE_TIME]
+  ignoredEntities: [DATE_TIME]   # entity types that never block, e.g. add LOCATION, NRP
 ```
 
 Edit them and run `./scripts/deploy.sh` again. The model and guardrail settings
@@ -203,8 +204,9 @@ kubectl delete namespace litellm
 
 ## Limitations
 
-- With every entity type enabled, ordinary requests are sometimes blocked
-  because answers and reasoning contain names, places or dates.
+- Ordinary requests are sometimes blocked because answers and reasoning
+  contain names, places or nationalities.
+- `DATE_TIME` is ignored, so a date of birth on its own isn't blocked.
 - Detection uses Presidio's English model.
 - Tool-call arguments aren't checked, and PII is blocked, never masked.
 

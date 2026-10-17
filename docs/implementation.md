@@ -97,7 +97,9 @@ class PIIDetector:
 - It uses every entity type Presidio supports for the language (19 for English:
   `EMAIL_ADDRESS`, `PERSON`, `PHONE_NUMBER`, `US_SSN`, `CREDIT_CARD`,
   `LOCATION`, `DATE_TIME`, `IP_ADDRESS`, `URL` and more), minus any listed in
-  `PII_IGNORED_ENTITIES`.
+  `PII_IGNORED_ENTITIES`. The Helm chart ignores `DATE_TIME`: a date or time
+  isn't PII on its own, and model reasoning almost always contains one ("today",
+  "a moment"), so it blocked most responses.
 - A match counts only if Presidio's confidence is at least `PII_SCORE_THRESHOLD`
   (default 0.4). Presidio scores phone numbers at 0.4, so a higher default would
   miss them, while very weak matches (0.01 to 0.05, such as any 9-digit number)
@@ -199,14 +201,15 @@ it into the cluster, and installs or upgrades the release.
 | Fail closed | If the PII service is down, unchecked text could contain PII, so the call fails. |
 | Raise `HTTPException(400)` to block | LiteLLM logs it as `guardrail_intervened`, a policy block. A plain `Exception` would return a 500 and be logged as `guardrail_failed_to_respond`. |
 | `default_on: true` | Runs on every request, so clients can't skip it. |
-| Every Presidio entity type blocks by default | This gives LiteLLM Presidio's full coverage. It's broad: names, places and dates also block, including in the model's reasoning. `piiService.ignoredEntities` narrows it without code changes. |
+| Every Presidio entity type blocks, except `DATE_TIME` | This gives LiteLLM Presidio's full coverage. It's broad: names, places and nationalities also block, including in the model's reasoning. `DATE_TIME` is ignored because dates aren't PII on their own and appear in almost every response. `piiService.ignoredEntities` changes this without code changes. |
 | Pin LiteLLM 1.105.1 | The guardrail depends on behaviour of this release: how the file is loaded, the streaming setting, and which hooks run. |
 
 ## Limitations
 
-- With every entity type enabled, ordinary requests are sometimes blocked: model
-  answers and reasoning often contain dates, names or places. Add those types to
+- Ordinary requests are sometimes blocked: model answers and reasoning often
+  contain names, places or nationalities. Add those types to
   `piiService.ignoredEntities` if that's too strict.
+- `DATE_TIME` is ignored, so a date of birth on its own isn't blocked.
 - Presidio's English model is used, so PII in other languages is detected less
   reliably.
 - Tool-call arguments aren't checked.

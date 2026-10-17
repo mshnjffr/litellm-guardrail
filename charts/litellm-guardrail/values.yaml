@@ -8,9 +8,12 @@ piiService:
     tag: 0.1.0
     pullPolicy: IfNotPresent  # built locally, see scripts/deploy.sh
   replicas: 1
-  # Detection settings. Every Presidio entity type blocks by default.
+  # Detection settings. Every Presidio entity type blocks, except those ignored.
   scoreThreshold: 0.4         # Presidio confidence needed to count as PII (0-1)
-  ignoredEntities: []         # entity types that never block, e.g. [LOCATION, DATE_TIME]
+  # Entity types that never block. DATE_TIME isn't PII on its own, and model
+  # reasoning almost always contains one ("today", "a moment"), so it would
+  # block most responses.
+  ignoredEntities: [DATE_TIME]
   resources:
     requests:
       cpu: 250m
