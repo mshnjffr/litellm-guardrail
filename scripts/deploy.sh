@@ -1,7 +1,10 @@
 #!/bin/sh
 # Builds the PII service image, makes it available to the cluster, and installs
-# or upgrades the Helm release. Run from the repo root; re-run after any change.
+# or upgrades the Helm release. Re-run after any change.
 set -eu
+
+# Work from the repo root, wherever the script is run from.
+cd "$(dirname "$0")/.."
 
 RELEASE=litellm-guardrail
 NAMESPACE=${NAMESPACE:-litellm}
