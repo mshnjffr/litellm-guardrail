@@ -96,12 +96,14 @@ A prompt without PII is answered (HTTP 200):
 ```sh
 curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Write a haiku about the sea."}]}'
+  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Spell the word cat backwards. Reply with only the result."}]}'
 ```
 
-Every Presidio entity type blocks, including names, places and dates. These
-often appear in the model's reasoning, so an ordinary prompt is sometimes
-blocked too. See [Configuration](#configuration) to narrow it.
+Every Presidio entity type blocks, including names, places, dates and
+nationalities, and these often appear in the model's reasoning. For example,
+"Write a haiku about the sea." is often blocked with `PII detected in model
+reasoning: NRP`, because the model reasons about haiku being Japanese. See
+[Configuration](#configuration) to narrow it.
 
 PII in the prompt is blocked before it reaches the model (HTTP 400):
 
