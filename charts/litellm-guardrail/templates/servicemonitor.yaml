@@ -1,0 +1,17 @@
+{{- if .Values.piiService.serviceMonitor.enabled }}
+# Tells the Prometheus Operator to scrape the PII service's /metrics.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pii-service
+  labels:
+    {{- include "piiService.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "piiService.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.piiService.serviceMonitor.interval }}
+{{- end }}

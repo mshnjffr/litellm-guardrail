@@ -1,0 +1,6 @@
+dependencies:
+- name: litellm-helm
+  repository: oci://docker.litellm.ai/berriai
+  version: 1.105.1
+digest: sha256:0fa4f35e0d27cd54b5912c222b1e6e3c98f572a5c9c6fa924ca8fe193eae120e
+generated: "2026-10-17T19:11:31.258823+01:00"

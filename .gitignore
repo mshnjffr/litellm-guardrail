@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .DS_Store
 .claude/
+# Downloaded by `helm dependency build`
+charts/litellm-guardrail/charts/

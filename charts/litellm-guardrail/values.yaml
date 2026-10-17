@@ -1,0 +1,74 @@
+# The guardrail's Python source, mounted into LiteLLM next to its config.yaml.
+# Pass it with: --set-file guardrailCode=guardrail/pii_guardrail.py
+guardrailCode: ""
+
+piiService:
+  image:
+    repository: pii-service
+    tag: 0.1.0
+    pullPolicy: IfNotPresent  # built locally, see scripts/deploy.sh
+  replicas: 1
+  # Detection settings. Every Presidio entity type blocks by default.
+  scoreThreshold: 0.4         # Presidio confidence needed to count as PII (0-1)
+  ignoredEntities: []         # entity types that never block, e.g. [LOCATION, DATE_TIME]
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      memory: 2Gi
+  # For clusters running the Prometheus Operator. Pods are also annotated with
+  # prometheus.io/scrape for annotation-based scraping.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+
+# Values for the official LiteLLM chart (oci://docker.litellm.ai/berriai/litellm-helm).
+litellm:
+  fullnameOverride: litellm
+  image:
+    repository: docker.litellm.ai/berriai/litellm
+    tag: v1.105.1
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 4000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+  proxy_config:
+    model_list:
+      - model_name: deepseek-r1:8b
+        litellm_params:
+          model: ollama/deepseek-r1:8b
+          api_base: http://host.docker.internal:11434  # Ollama on the host machine
+          # Moves streamed reasoning into the response content, where
+          # pii-guardrail scans it. Without this, streamed reasoning isn't checked.
+          merge_reasoning_content_in_choices: true
+    guardrails:
+      - guardrail_name: pii-guardrail
+        litellm_params:
+          guardrail: pii_guardrail.PIIGuardrail
+          mode: [pre_call, post_call]   # scan the prompt and the model response
+          default_on: true              # apply to every request
+          api_base: http://pii-service:8000
+      # Reasoning models return their reasoning separately from the response
+      # content, and LiteLLM doesn't pass it to pii-guardrail.
+      - guardrail_name: pii-reasoning-guardrail
+        litellm_params:
+          guardrail: pii_guardrail.PIIReasoningGuardrail
+          mode: post_call
+          default_on: true
+          api_base: http://pii-service:8000
+    general_settings:
+      master_key: os.environ/PROXY_MASTER_KEY
+  # LiteLLM loads guardrail modules from the directory its config.yaml is in.
+  volumes:
+    - name: guardrail-code
+      configMap:
+        name: litellm-guardrail-code
+  volumeMounts:
+    - name: guardrail-code
+      mountPath: /etc/litellm/pii_guardrail.py
+      subPath: pii_guardrail.py

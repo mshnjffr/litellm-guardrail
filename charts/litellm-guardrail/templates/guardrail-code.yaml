@@ -1,0 +1,11 @@
+# The guardrail's Python source, mounted into the LiteLLM pod. The name is fixed
+# because the LiteLLM chart's `volumes` value in values.yaml refers to it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-guardrail-code
+  labels:
+    app.kubernetes.io/part-of: litellm-guardrail
+data:
+  pii_guardrail.py: |
+{{ required "Pass the guardrail code with --set-file guardrailCode=guardrail/pii_guardrail.py" .Values.guardrailCode | indent 4 }}

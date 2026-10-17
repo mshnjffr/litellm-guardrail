@@ -1,0 +1,12 @@
+apiVersion: v2
+name: litellm-guardrail
+description: LiteLLM proxy with a custom guardrail that blocks PII, using a Presidio-based PII service.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  # The official LiteLLM chart. Pinned: the guardrail is tested against this release.
+  - name: litellm-helm
+    alias: litellm
+    version: 1.105.1
+    repository: oci://docker.litellm.ai/berriai

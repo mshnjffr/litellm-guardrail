@@ -1,77 +1,87 @@
 # LiteLLM PII guardrail
 
 A [custom LiteLLM guardrail](https://docs.litellm.ai/docs/proxy/guardrails/custom_guardrail)
-that blocks email addresses and US Social Security numbers in prompts and in
-model responses, including streamed responses and reasoning output. It runs
-entirely on your machine: LiteLLM and Postgres in Docker, and the
-`deepseek-r1:8b` model in Ollama.
+that blocks PII in prompts, model responses (including streamed responses) and
+model reasoning. A separate Python service built on
+[Microsoft Presidio](https://microsoft.github.io/presidio/) decides what counts
+as PII, and the guardrail calls it over HTTP. Both run in Kubernetes, deployed
+with Helm, and the service exposes Prometheus metrics. Everything runs locally:
+the model is `deepseek-r1:8b` in Ollama.
 
 How it's built and integrated, with architecture diagrams:
 [docs/implementation.md](docs/implementation.md).
 
-| File | Purpose |
+| Path | Purpose |
 | --- | --- |
-| `pii_guardrail.py` | The PII detector and the two guardrails |
-| `config.yaml` | The model and the guardrail registrations |
-| `docker-compose.yml` | LiteLLM (pinned to `v1.105.1`) and Postgres |
-| `tests/test_pii_guardrail.py` | Unit tests |
+| `pii-service/` | The PII detection service (FastAPI + Presidio) and its Dockerfile |
+| `guardrail/pii_guardrail.py` | The LiteLLM guardrails, which call the PII service |
+| `charts/litellm-guardrail/` | Helm chart: the official LiteLLM chart, Postgres and the PII service |
+| `scripts/deploy.sh` | Builds the service image and installs or upgrades the Helm release |
 | `docs/implementation.md` | Implementation guide and architecture |
 
 ## Prerequisites
 
-- **Docker** with Compose v2: Docker Desktop on macOS or Windows, or Docker
-  Engine on Linux.
+- **[Docker Desktop](https://www.docker.com/products/docker-desktop/)** with at
+  least 8 GB of memory (Settings → Resources), and its `kubectl`.
+- **[Helm](https://helm.sh/docs/intro/install/)** 3.8 or later: `brew install helm` on macOS.
 - **[Ollama](https://ollama.com/download)**.
-- About 8 GB of free disk space (model and images) and 16 GB of RAM.
-- `git`, `curl` and `openssl`.
+- About 15 GB of free disk space (the model and container images).
+- `git` and `curl`. On Windows, run the commands in Git Bash or WSL.
 
 ## First-time setup
 
-**1. Start Ollama and download the model** (about 5 GB):
+**1. Download the model** (about 5 GB):
 
 ```sh
 ollama pull deepseek-r1:8b
 ```
 
-On Linux, Ollama listens only on `127.0.0.1` by default, which Docker
-containers can't reach. Set `OLLAMA_HOST=0.0.0.0` for the Ollama service and
-restart it (see the [Ollama FAQ](https://github.com/ollama/ollama/blob/main/docs/faq.md#how-do-i-configure-ollama-server)).
-macOS and Windows need no changes.
+**2. Turn on Kubernetes** in Docker Desktop: **Settings → Kubernetes → Enable
+Kubernetes → Apply & restart**. Either cluster type (kubeadm or kind) works.
+When it's running, check that `kubectl` points at it:
 
-**2. Clone the repo:**
+```sh
+kubectl config use-context docker-desktop
+kubectl get nodes   # STATUS should be Ready
+```
+
+**3. Clone the repo:**
 
 ```sh
 git clone https://github.com/mshnjffr/litellm-guardrail.git
 cd litellm-guardrail
+git checkout presidio-service
 ```
 
-**3. Create `.env` with random keys:**
+**4. Deploy:**
 
 ```sh
-printf 'LITELLM_MASTER_KEY=sk-%s\nLITELLM_SALT_KEY=sk-%s\n' "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
+./scripts/deploy.sh
 ```
 
-`LITELLM_MASTER_KEY` is the admin API key and the UI password.
-`LITELLM_SALT_KEY` encrypts credentials in the database; don't change it after
-the first start. To use a port other than 4000, add `LITELLM_PORT=4001`.
-
-**4. Start the gateway:**
+This builds the PII service image, loads it into the cluster, and installs the
+Helm release into the `litellm` namespace. The first run downloads about 3 GB of
+images and models and takes around 10 minutes. Check everything is running:
 
 ```sh
-docker compose up -d
+kubectl -n litellm get pods   # litellm, pii-service and postgresql should be Running
 ```
 
-The first start downloads the images and sets up the database, which takes a
-few minutes. Wait until it's ready:
+**5. Open the gateway on localhost:4000.** Keep this running in its own terminal:
 
 ```sh
-until curl -fs localhost:4000/health/readiness >/dev/null; do sleep 5; done; echo ready
+kubectl -n litellm port-forward svc/litellm 4000:4000
 ```
 
-**5. Check both guardrails are loaded:**
+**6. Get the master key** (the admin API key, and the UI password for user `admin`):
 
 ```sh
-set -a; . ./.env; set +a   # loads LITELLM_MASTER_KEY into this shell
+export LITELLM_MASTER_KEY=$(kubectl -n litellm get secret litellm-masterkey -o jsonpath='{.data.masterkey}' | base64 -d)
+```
+
+**7. Check both guardrails are loaded:**
+
+```sh
 curl -s localhost:4000/guardrails/list -H "Authorization: Bearer $LITELLM_MASTER_KEY"
 ```
 
@@ -81,74 +91,119 @@ The response should list `pii-guardrail` and `pii-reasoning-guardrail`.
 
 The first request loads the model into memory, so it can take a minute.
 
-A clean prompt is answered (HTTP 200):
+A prompt without PII is answered (HTTP 200):
 
 ```sh
 curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "What is the capital of France? One word."}]}'
+  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Write a haiku about the sea."}]}'
 ```
+
+Every Presidio entity type blocks, including names, places and dates. These
+often appear in the model's reasoning, so an ordinary prompt is sometimes
+blocked too. See [Configuration](#configuration) to narrow it.
 
 PII in the prompt is blocked before it reaches the model (HTTP 400):
 
 ```sh
 curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Send the report to jane.doe@example.com"}]}'
-# {"error": {"message": "PII detected in prompt: email", ...}}
+  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "My social security number is 219-09-9999"}]}'
+# {"error": {"message": "PII detected in prompt: US_SSN", ...}}
 ```
 
-PII in the model's response is blocked too. Here the model writes the SSN,
-and the client gets only the error, streamed or not:
+PII the model writes is blocked too, and a streamed response sends only the error:
 
 ```sh
 curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model": "deepseek-r1:8b", "stream": true, "messages": [{"role": "user", "content": "Format the digits 123456789 as XXX-XX-XXXX. Reply with only the result."}]}'
-# data: {"error": {"message": "PII detected in model response: us_ssn", ...}}
+  -d '{"model": "deepseek-r1:8b", "stream": true, "messages": [{"role": "user", "content": "Make up a realistic example email address for a fictional user. Reply with only the address."}]}'
+# data: {"error": {"message": "PII detected in model response: EMAIL_ADDRESS, ...", ...}}
 ```
 
-To test the guardrail without calling the model:
+### The PII service and its metrics
+
+In another terminal, open the service on localhost:8000:
 
 ```sh
-curl -s localhost:4000/guardrails/apply_guardrail -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  -H 'Content-Type: application/json' -d '{"guardrail_name": "pii-guardrail", "text": "my SSN is 123-45-6789"}'
+kubectl -n litellm port-forward svc/pii-service 8000:8000
 ```
 
-Every response carries an `x-litellm-applied-guardrails` header. Blocked
-requests appear in the UI at <http://localhost:4000/ui> (user `admin`, password
-`LITELLM_MASTER_KEY`) under **Logs**, with guardrail status `guardrail_intervened`.
+Ask it directly:
+
+```sh
+curl -s localhost:8000/v1/analyze -H 'Content-Type: application/json' \
+  -d '{"texts": ["Call John Smith on +44 20 7946 0958"], "source": "request"}'
+# {"block": true, "entities": ["PERSON", "PHONE_NUMBER"]}
+```
+
+See its Prometheus metrics, which count decisions and PII types for the
+requests the gateway has sent:
+
+```sh
+curl -s localhost:8000/metrics | grep pii_service_
+```
+
+Blocked requests also appear in the LiteLLM UI at <http://localhost:4000/ui>
+under **Logs**, with guardrail status `guardrail_intervened`.
+
+## Configuration
+
+The detection settings are in [`charts/litellm-guardrail/values.yaml`](charts/litellm-guardrail/values.yaml):
+
+```yaml
+piiService:
+  scoreThreshold: 0.4    # Presidio confidence needed to count as PII (0-1)
+  ignoredEntities: []    # entity types that never block, e.g. [LOCATION, DATE_TIME]
+```
+
+Edit them and run `./scripts/deploy.sh` again. The model and guardrail settings
+are in the same file, under `litellm.proxy_config`.
 
 ## Run the tests
 
+PII service tests, against the real Presidio model:
+
 ```sh
-docker compose exec litellm python -m unittest discover -s /app/custom/tests -v
+docker build --target test pii-service
+```
+
+Guardrail tests, inside the LiteLLM image:
+
+```sh
+docker run --rm -v "$PWD/guardrail:/guardrail:ro" --entrypoint python \
+  docker.litellm.ai/berriai/litellm:v1.105.1 -m unittest discover -s /guardrail/tests -v
 ```
 
 ## Making changes
 
-The repo is mounted into the container, so after editing `pii_guardrail.py` or
-`config.yaml`, restart LiteLLM:
-
-```sh
-docker compose restart litellm
-```
+After changing the service, the guardrail or the chart, run
+`./scripts/deploy.sh` again. It rebuilds the image, upgrades the release and
+restarts the pods.
 
 ## Troubleshooting
 
 | Problem | Fix |
 | --- | --- |
-| `docker compose up` says `set it in .env` | Run step 3 in the repo directory. |
-| Port 4000 already in use | Add `LITELLM_PORT=4001` to `.env`, run `docker compose up -d`, and use that port. |
-| Model requests fail with a connection error | Check Ollama is running (`ollama list`). On Linux, check `OLLAMA_HOST` (step 1). |
-| Anything else | `docker compose logs litellm` |
+| `kubectl get nodes` fails | Kubernetes isn't running yet (step 2), or the context is wrong: `kubectl config use-context docker-desktop`. |
+| `pii-service` is in `ErrImagePull` or `ErrImageNeverPull` | The image isn't in the cluster. Run `./scripts/deploy.sh` again. |
+| A pod keeps restarting | `kubectl -n litellm describe pod <name>` and `kubectl -n litellm logs <name>`. LiteLLM restarting once on first install, while Postgres starts, is normal. |
+| Port 4000 already in use | Forward another port: `kubectl -n litellm port-forward svc/litellm 4001:4000`. |
+| Model requests fail with a connection error | Check Ollama is running (`ollama list`). |
+| Requests fail with a 500 mentioning `pii-service` | The PII service is down, so the guardrail fails closed. Check `kubectl -n litellm get pods`. |
 
-To stop the gateway: `docker compose down`. To also delete the database:
-`docker compose down -v`.
+To remove everything, including the database:
+
+```sh
+helm -n litellm uninstall litellm-guardrail
+kubectl delete namespace litellm
+```
 
 ## Limitations
 
-Regex detection catches PII in standard formats, which suits accidental
-disclosure. It won't stop someone deliberately evading it (`jane at example dot
-com`). Tool-call arguments aren't scanned. See
-[docs/implementation.md](docs/implementation.md#limitations).
+- With every entity type enabled, ordinary requests are sometimes blocked
+  because answers and reasoning contain names, places or dates.
+- Detection uses Presidio's English model.
+- Tool-call arguments aren't checked, and PII is blocked, never masked.
+
+See [docs/implementation.md](docs/implementation.md#limitations).

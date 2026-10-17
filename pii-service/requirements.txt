@@ -1,0 +1,5 @@
+presidio-analyzer==2.2.364
+spacy==3.8.16
+fastapi==0.143.3
+uvicorn==0.54.0
+prometheus-client==0.26.0
