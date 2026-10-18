@@ -150,6 +150,23 @@ Standard `process_*` and `python_*` metrics are included. The pods carry
 `prometheus.io/scrape` annotations, and the chart can create a `ServiceMonitor`
 for the Prometheus Operator (`piiService.serviceMonitor.enabled`).
 
+LiteLLM's own guardrail metrics complement these. The chart turns on LiteLLM's
+Prometheus callback (`callbacks: ["prometheus"]` in `litellm.proxy_config`),
+which serves `litellm_guardrail_requests_total`, `litellm_guardrail_latency_seconds`
+and `litellm_guardrail_errors_total` at `/metrics/` on port 4000, labelled by
+guardrail name and hook. Together:
+
+| Question | Metric |
+| --- | --- |
+| Are the guardrails running, and how much latency do they add? | `litellm_guardrail_requests_total`, `litellm_guardrail_latency_seconds` (gateway side, including the HTTP call) |
+| Is the PII service failing? | `litellm_guardrail_errors_total` with an `error_type` other than `HTTPException`, and `pii_service_errors_total` |
+| How many prompts are masked, and how many responses blocked? | `pii_service_requests_total` by `decision`. LiteLLM counts a block as an error and a mask as `success`, so it can't answer this. |
+| Which PII types turn up? | `pii_service_entities_detected_total` |
+
+In version 1.105.1, LiteLLM's `/metrics` requires the master key unless
+`require_auth_for_metrics_endpoint` is `false`, which the chart sets. The LiteLLM
+pod is also annotated for scraping.
+
 ### Container image
 
 [`pii-service/Dockerfile`](../pii-service/Dockerfile) installs Presidio and

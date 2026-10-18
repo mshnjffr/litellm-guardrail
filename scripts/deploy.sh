@@ -41,4 +41,4 @@ if [ "$already_installed" = true ]; then
 fi
 
 echo "==> Done. Reach the gateway with:"
-echo "    kubectl --namespace $NAMESPACE port-forward svc/litellm 4000:4000"
+echo "    kubectl --namespace $NAMESPACE port-forward deploy/litellm 4000:4000"

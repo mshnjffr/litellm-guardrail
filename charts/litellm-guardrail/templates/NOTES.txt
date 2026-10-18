@@ -1,11 +1,13 @@
 LiteLLM with the PII guardrail is deployed in namespace {{ .Release.Namespace }}.
 
 1. Reach the gateway on localhost:4000:
-     kubectl -n {{ .Release.Namespace }} port-forward svc/litellm 4000:4000
+     kubectl -n {{ .Release.Namespace }} port-forward deploy/litellm 4000:4000
 
 2. Get the master key (admin API key, and the UI password for user "admin"):
      kubectl -n {{ .Release.Namespace }} get secret litellm-masterkey -o jsonpath='{.data.masterkey}' | base64 -d
 
-3. See the PII service's Prometheus metrics:
+3. See the Prometheus metrics. LiteLLM's guardrail metrics (with step 1 running):
+     curl localhost:4000/metrics/ | grep '^litellm_guardrail'
+   The PII service's decision metrics:
      kubectl -n {{ .Release.Namespace }} port-forward svc/pii-service 8000:8000
      curl localhost:8000/metrics

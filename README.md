@@ -71,8 +71,12 @@ kubectl -n litellm get pods   # litellm, pii-service and postgresql should be Ru
 **5. Open the gateway on localhost:4000.** Keep this running in its own terminal:
 
 ```sh
-kubectl -n litellm port-forward svc/litellm 4000:4000
+kubectl -n litellm port-forward deploy/litellm 4000:4000
 ```
+
+This targets the LiteLLM deployment rather than its service: right after a
+deploy, `svc/litellm` can pick the database migration job's pod and fail with
+`does not have a named port 'http'`.
 
 **6. Get the master key** (the admin API key, and the UI password for user `admin`):
 
@@ -142,8 +146,28 @@ curl -s localhost:8000/v1/analyze -H 'Content-Type: application/json' \
 # {"action": "mask", "entities": ["PERSON", "PHONE_NUMBER"], "texts": ["Call <PERSON> on <PHONE_NUMBER>"]}
 ```
 
-See its Prometheus metrics, which count decisions and PII types for the
-requests the gateway has sent:
+### Prometheus metrics
+
+Two sets of metrics cover the guardrail, from each side of the HTTP call.
+
+**LiteLLM's guardrail metrics** count every guardrail call as the gateway sees
+it, at <http://localhost:4000/metrics/> (note the trailing slash; `/metrics`
+redirects there):
+
+```sh
+curl -s localhost:4000/metrics/ | grep '^litellm_guardrail'
+```
+
+| Metric | What it counts |
+| --- | --- |
+| `litellm_guardrail_requests_total` | Calls to each guardrail, by `hook_type` (`pre_call`, `post_call`) and `status` |
+| `litellm_guardrail_latency_seconds` | How long each guardrail takes, including the call to the PII service |
+| `litellm_guardrail_errors_total` | Guardrail errors, by `error_type` |
+
+LiteLLM counts a block as an error (`status="error"`, `error_type="HTTPException"`),
+and masked prompts as `success`. **The PII service's metrics** fill in what
+LiteLLM can't tell apart: each decision (`allow`, `mask` or `block`) and the PII
+types found:
 
 ```sh
 curl -s localhost:8000/metrics | grep pii_service_
@@ -194,7 +218,7 @@ restarts the pods.
 | `kubectl get nodes` fails | Kubernetes isn't running yet (step 2), or the context is wrong: `kubectl config use-context docker-desktop`. |
 | `pii-service` is in `ErrImagePull` or `ErrImageNeverPull` | The image isn't in the cluster. Run `./scripts/deploy.sh` again. |
 | A pod keeps restarting | `kubectl -n litellm describe pod <name>` and `kubectl -n litellm logs <name>`. LiteLLM restarting once on first install, while Postgres starts, is normal. |
-| Port 4000 already in use | Forward another port: `kubectl -n litellm port-forward svc/litellm 4001:4000`. |
+| Port 4000 already in use | Forward another port: `kubectl -n litellm port-forward deploy/litellm 4001:4000`. |
 | Model requests fail with a connection error | Check Ollama is running (`ollama list`). |
 | Requests fail with a 500 mentioning `pii-service` | The PII service is down, so the guardrail fails closed. Check `kubectl -n litellm get pods`. |
 
