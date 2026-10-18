@@ -34,8 +34,9 @@ flowchart TB
                 guardrail["pii-guardrail + pii-reasoning-guardrail<br/>pii_guardrail.py, from a ConfigMap"]
                 router --- guardrail
             end
-            pii["PII service pod<br/>FastAPI + Presidio + spaCy<br/>/v1/analyze, /metrics for Prometheus"]
+            pii["PII service pod<br/>FastAPI + Presidio + spaCy<br/>/v1/analyze, /metrics"]
             db[("Postgres<br/>keys, spend and guardrail logs")]
+            prometheus["Prometheus pod<br/>scrapes both /metrics every 15 s"]
         end
         ollama["Ollama on the host, port 11434<br/>deepseek-r1:8b"]
     end
@@ -45,6 +46,8 @@ flowchart TB
     guardrail -- "POST /v1/analyze" --> pii
     router -.-> db
     guardrail ~~~ db
+    prometheus -. scrapes .-> router
+    prometheus -. scrapes .-> pii
 ```
 
 ### Request flow
@@ -173,6 +176,12 @@ In version 1.105.1, LiteLLM's `/metrics` requires the master key unless
 `require_auth_for_metrics_endpoint` is `false`, which the chart sets. The LiteLLM
 pod is also annotated for scraping.
 
+The chart includes a small Prometheus (`prometheus.enabled`, on by default) that
+scrapes both every 15 seconds, so the metrics can be graphed and queried. It
+keeps one day of data in the pod's temporary storage, so the history resets when
+the pod is replaced. A cluster that already runs Prometheus can turn it off and
+scrape the pods through their annotations instead.
+
 ### Container image
 
 [`pii-service/Dockerfile`](../pii-service/Dockerfile) installs Presidio and
@@ -236,6 +245,8 @@ content, where `PIIGuardrail` checks it. Clients then see the reasoning inside
 - **The PII service** Deployment and Service, with its detection settings as
   values (`piiService.scoreThreshold`, `piiService.ignoredEntities`,
   `piiService.responseIgnoredEntities`).
+- **Prometheus** (`prometheus.enabled`), with a scrape config for LiteLLM and the
+  PII service.
 
 [`scripts/deploy.sh`](../scripts/deploy.sh) builds the PII service image, loads
 it into the cluster, and installs or upgrades the release.

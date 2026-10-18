@@ -31,6 +31,22 @@ piiService:
     enabled: false
     interval: 30s
 
+# A small Prometheus that scrapes LiteLLM and the PII service. Open its UI with:
+#   kubectl -n litellm port-forward svc/prometheus 9090:9090
+prometheus:
+  enabled: true
+  image:
+    repository: prom/prometheus
+    tag: v3.15.0
+  scrapeInterval: 15s
+  retention: 1d   # data is kept in the pod only, and resets when it restarts
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
 # Values for the official LiteLLM chart (oci://docker.litellm.ai/berriai/litellm-helm).
 litellm:
   fullnameOverride: litellm

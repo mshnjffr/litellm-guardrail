@@ -1,0 +1,112 @@
+{{- if .Values.prometheus.enabled }}
+{{- $config := include "prometheus.config" . }}
+# A small Prometheus that scrapes LiteLLM's guardrail metrics and the PII
+# service's decision metrics. Data is kept in the pod's temporary storage
+# (emptyDir), so it resets when the pod is replaced.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: litellm-guardrail
+data:
+  prometheus.yml: |
+    {{- $config | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: litellm-guardrail
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: prometheus
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        # Restart Prometheus when its scrape config changes.
+        checksum/config: {{ $config | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534  # "nobody", the user the image runs as
+        fsGroup: 65534
+      containers:
+        - name: prometheus
+          image: "{{ .Values.prometheus.image.repository }}:{{ .Values.prometheus.image.tag }}"
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time={{ .Values.prometheus.retention }}
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.prometheus.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: litellm-guardrail
+spec:
+  selector:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
+{{- end }}
+
+{{- define "prometheus.config" -}}
+global:
+  scrape_interval: {{ .Values.prometheus.scrapeInterval }}
+scrape_configs:
+  # LiteLLM: litellm_guardrail_requests_total, _latency_seconds, _errors_total.
+  # /metrics redirects to /metrics/, so scrape the trailing-slash path directly.
+  - job_name: litellm
+    metrics_path: /metrics/
+    static_configs:
+      - targets: ["litellm:4000"]
+  # PII service: pii_service_requests_total (allow/mask/block), entity types, latency.
+  - job_name: pii-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["pii-service:8000"]
+{{- end }}

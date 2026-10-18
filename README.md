@@ -16,7 +16,7 @@ How it's built and integrated, with architecture diagrams:
 | --- | --- |
 | `pii-service/` | The PII detection service (FastAPI + Presidio) and its Dockerfile |
 | `guardrail/pii_guardrail.py` | The LiteLLM guardrails, which call the PII service |
-| `charts/litellm-guardrail/` | Helm chart: the official LiteLLM chart, Postgres and the PII service |
+| `charts/litellm-guardrail/` | Helm chart: the official LiteLLM chart, Postgres, the PII service and Prometheus |
 | `scripts/deploy.sh` | Builds the service image and installs or upgrades the Helm release |
 | `docs/implementation.md` | Implementation guide and architecture |
 
@@ -65,7 +65,7 @@ Helm release into the `litellm` namespace. The first run downloads about 3 GB of
 images and models and takes around 10 minutes. Check everything is running:
 
 ```sh
-kubectl -n litellm get pods   # litellm, pii-service and postgresql should be Running
+kubectl -n litellm get pods   # litellm, pii-service, postgresql and prometheus should be Running
 ```
 
 **5. Open the gateway on localhost:4000.** Keep this running in its own terminal:
@@ -173,6 +173,28 @@ types found:
 ```sh
 curl -s localhost:8000/metrics | grep pii_service_
 ```
+
+### Prometheus
+
+The chart also deploys Prometheus, which scrapes both sets of metrics every 15
+seconds. Open its UI on <http://localhost:9090>, with this running in its own
+terminal:
+
+```sh
+kubectl -n litellm port-forward svc/prometheus 9090:9090
+```
+
+**Status → Target health** should show `litellm` and `pii-service` as **UP**.
+Then try these in the **Query** page (the Graph tab shows them over time):
+
+| Query | Shows |
+| --- | --- |
+| `sum by (source, decision) (pii_service_requests_total)` | Prompts masked or allowed, and responses blocked or allowed |
+| `sum by (entity_type) (pii_service_entities_detected_total)` | Which PII types turn up |
+| `sum by (guardrail_name, hook_type, status) (litellm_guardrail_requests_total)` | Guardrail calls, as LiteLLM sees them |
+| `histogram_quantile(0.95, sum by (le, guardrail_name) (rate(litellm_guardrail_latency_seconds_bucket[5m])))` | 95th-percentile guardrail latency |
+
+The history is kept in the Prometheus pod and resets when it's replaced.
 
 Blocked requests also appear in the LiteLLM UI at <http://localhost:4000/ui>
 under **Logs**, with guardrail status `guardrail_intervened`. Masked prompts are

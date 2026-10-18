@@ -11,3 +11,8 @@ LiteLLM with the PII guardrail is deployed in namespace {{ .Release.Namespace }}
    The PII service's decision metrics:
      kubectl -n {{ .Release.Namespace }} port-forward svc/pii-service 8000:8000
      curl localhost:8000/metrics
+{{- if .Values.prometheus.enabled }}
+
+4. Open Prometheus, which scrapes both, on http://localhost:9090:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/prometheus 9090:9090
+{{- end }}
