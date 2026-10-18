@@ -13,7 +13,7 @@ class ServiceMetrics:
 
         self.requests = Counter(
             "pii_service_requests",
-            "Analyze requests, by what was checked (request, response or reasoning) and the decision.",
+            "Analyze requests, by what was checked (request, response or reasoning) and the decision (allow, mask or block).",
             ["source", "decision"],
             registry=self.registry,
         )
@@ -37,7 +37,7 @@ class ServiceMetrics:
             registry=self.registry,
         )
 
-    def record_decision(self, source: str, block: bool, entities: list[str]) -> None:
-        self.requests.labels(source=source, decision="block" if block else "allow").inc()
+    def record_decision(self, source: str, action: str, entities: list[str]) -> None:
+        self.requests.labels(source=source, decision=action).inc()
         for entity in entities:
             self.entities.labels(source=source, entity_type=entity).inc()

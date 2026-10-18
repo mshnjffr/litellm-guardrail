@@ -33,28 +33,52 @@ class AnalyzeEndpointTest(unittest.TestCase):
         return response.json()
 
     def test_allows_text_without_pii(self):
-        self.assertEqual(self.analyze("What is 2 + 2?", "Write a haiku about the sea."), {"block": False, "entities": []})
+        for source in ("request", "response", "reasoning"):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    self.analyze("What is 2 + 2?", "Write a haiku about the sea.", source=source),
+                    {"action": "allow", "entities": [], "texts": None},
+                )
 
-    def test_blocks_pii(self):
-        for text, entity in (
-            ("Send the report to jane.doe@example.com", "EMAIL_ADDRESS"),
-            ("My social security number is 219-09-9999", "US_SSN"),
-            ("My card is 4111 1111 1111 1111", "CREDIT_CARD"),
-            ("Call me on +44 20 7946 0958", "PHONE_NUMBER"),
-            ("my ip is 192.168.1.20", "IP_ADDRESS"),
-            ("John Smith wrote this", "PERSON"),
+    def test_masks_pii_in_prompts(self):
+        for text, entity, masked in (
+            ("Send the report to jane.doe@example.com", "EMAIL_ADDRESS", "Send the report to <EMAIL_ADDRESS>"),
+            ("My social security number is 219-09-9999", "US_SSN", "My social security number is <US_SSN>"),
+            ("My card is 4111 1111 1111 1111", "CREDIT_CARD", "My card is <CREDIT_CARD>"),
+            ("Call me on +44 20 7946 0958", "PHONE_NUMBER", "Call me on <PHONE_NUMBER>"),
+            ("my ip is 192.168.1.20", "IP_ADDRESS", "my ip is <IP_ADDRESS>"),
+            ("John Smith wrote this", "PERSON", "<PERSON> wrote this"),
         ):
             with self.subTest(entity=entity):
                 result = self.analyze(text)
-                self.assertTrue(result["block"])
+                self.assertEqual(result["action"], "mask")
                 self.assertIn(entity, result["entities"])
+                self.assertEqual(result["texts"], [masked])
 
-    def test_response_never_contains_the_pii(self):
-        response = self.client.post("/v1/analyze", json={"texts": ["Email jane.doe@example.com"]})
-        self.assertNotIn("jane.doe", response.text)
+    def test_masks_each_text_of_a_conversation(self):
+        result = self.analyze("how are you? testuser@gmail.com", "Error fetching response", "hi")
+        self.assertEqual(result["texts"], ["how are you? <EMAIL_ADDRESS>", "Error fetching response", "hi"])
 
-    def test_detects_pii_split_across_texts(self):
-        self.assertIn("EMAIL_ADDRESS", self.analyze("Reply OK. My email is jane@", "example.com")["entities"])
+    def test_blocks_pii_split_across_prompt_parts(self):
+        for texts in (["Reply OK. My email is jane@", "example.com"], ["SSN 219-09-", "9999 please"]):
+            with self.subTest(texts=texts):
+                result = self.analyze(*texts)
+                self.assertEqual(result["action"], "block")
+                self.assertIsNone(result["texts"])
+
+    def test_blocks_pii_in_responses_and_reasoning(self):
+        for source in ("response", "reasoning"):
+            with self.subTest(source=source):
+                result = self.analyze("Sure: jane.doe@example.com", source=source)
+                self.assertEqual(result["action"], "block")
+                self.assertIn("EMAIL_ADDRESS", result["entities"])
+                self.assertIsNone(result["texts"])
+
+    def test_never_returns_the_pii(self):
+        for source in ("request", "response"):
+            with self.subTest(source=source):
+                response = self.client.post("/v1/analyze", json={"texts": ["Email jane.doe@example.com"], "source": source})
+                self.assertNotIn("jane.doe", response.text)
 
     def test_rejects_unknown_source(self):
         response = self.client.post("/v1/analyze", json={"texts": ["hi"], "source": "other"})
@@ -65,10 +89,12 @@ class AnalyzeEndpointTest(unittest.TestCase):
 
     def test_metrics_count_decisions_and_entities(self):
         self.analyze("Send the report to jane.doe@example.com")
-        self.analyze("What is 2 + 2?", source="response")
+        self.analyze("Sure: jane.doe@example.com", source="response")
+        self.analyze("What is 2 + 2?", source="reasoning")
         metrics = self.client.get("/metrics").text
-        self.assertIn('pii_service_requests_total{decision="block",source="request"} 1.0', metrics)
-        self.assertIn('pii_service_requests_total{decision="allow",source="response"} 1.0', metrics)
+        self.assertIn('pii_service_requests_total{decision="mask",source="request"} 1.0', metrics)
+        self.assertIn('pii_service_requests_total{decision="block",source="response"} 1.0', metrics)
+        self.assertIn('pii_service_requests_total{decision="allow",source="reasoning"} 1.0', metrics)
         self.assertIn('pii_service_entities_detected_total{entity_type="EMAIL_ADDRESS",source="request"} 1.0', metrics)
         self.assertIn('pii_service_analysis_duration_seconds_count{source="request"} 1.0', metrics)
 
@@ -77,12 +103,12 @@ class SettingsTest(unittest.TestCase):
     def test_ignored_entities_are_not_detected(self):
         detector = PIIDetector(Settings(ignored_entities=frozenset({"LOCATION"})), analyzer)
         self.assertNotIn("LOCATION", detector.entities)
-        self.assertFalse(detector.decide(["What is the capital of France?"]).block)
+        self.assertEqual(detector.decide(["What is the capital of France?"], "request").action, "allow")
 
     def test_score_threshold_drops_weak_matches(self):
         text = ["Call me on +44 20 7946 0958"]  # Presidio scores this phone number 0.4
-        self.assertTrue(PIIDetector(Settings(), analyzer).decide(text).block)
-        self.assertFalse(PIIDetector(Settings(score_threshold=0.9), analyzer).decide(text).block)
+        self.assertEqual(PIIDetector(Settings(), analyzer).decide(text, "response").action, "block")
+        self.assertEqual(PIIDetector(Settings(score_threshold=0.9), analyzer).decide(text, "response").action, "allow")
 
     def test_reads_settings_from_environment(self):
         env = {"PII_SCORE_THRESHOLD": "0.7", "PII_IGNORED_ENTITIES": "location, date_time", "PII_LANGUAGE": "en"}

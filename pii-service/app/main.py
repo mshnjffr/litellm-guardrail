@@ -1,32 +1,34 @@
 """
-PII detection service. LiteLLM's guardrail sends it the text of each prompt or
-model response, and it decides whether to block.
+PII detection service. LiteLLM's guardrail sends it the text of each prompt,
+model response or model reasoning, and it decides whether to allow it, mask the
+PII in it, or block it.
 
-    POST /v1/analyze  {"texts": ["..."], "source": "request"}  ->  {"block": true, "entities": ["EMAIL_ADDRESS"]}
+    POST /v1/analyze  {"texts": ["Email jane@example.com"], "source": "request"}
+                      -> {"action": "mask", "entities": ["EMAIL_ADDRESS"], "texts": ["Email <EMAIL_ADDRESS>"]}
     GET  /healthz     liveness and readiness
     GET  /metrics     Prometheus metrics
 """
 
 from contextlib import asynccontextmanager
-from typing import Literal
 
 from fastapi import FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
-from app.detector import PIIDetector, Settings
+from app.detector import Action, PIIDetector, Settings, Source
 from app.metrics import ServiceMetrics
 
 
 class AnalyzeRequest(BaseModel):
     texts: list[str]
-    # What the texts are, for metrics: the prompt, the model's response, or its reasoning.
-    source: Literal["request", "response", "reasoning"] = "request"
+    # What the texts are: the prompt (masked), or the model's response or reasoning (blocked).
+    source: Source = "request"
 
 
 class AnalyzeResponse(BaseModel):
-    block: bool
+    action: Action
     entities: list[str]  # PII types found, never the values
+    texts: list[str] | None = None  # the masked texts, when action is "mask"
 
 
 def create_app(detector: PIIDetector | None = None) -> FastAPI:
@@ -53,12 +55,12 @@ def create_app(detector: PIIDetector | None = None) -> FastAPI:
     def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         with metrics.duration.labels(source=request.source).time():
             try:
-                decision = app.state.detector.decide(request.texts)
+                decision = app.state.detector.decide(request.texts, request.source)
             except Exception:
                 metrics.errors.labels(source=request.source).inc()
                 raise
-        metrics.record_decision(request.source, decision.block, decision.entities)
-        return AnalyzeResponse(block=decision.block, entities=decision.entities)
+        metrics.record_decision(request.source, decision.action, decision.entities)
+        return AnalyzeResponse(action=decision.action, entities=decision.entities, texts=decision.texts)
 
     return app
 

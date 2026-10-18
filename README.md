@@ -1,10 +1,11 @@
 # LiteLLM PII guardrail
 
 A [custom LiteLLM guardrail](https://docs.litellm.ai/docs/proxy/guardrails/custom_guardrail)
-that blocks PII in prompts, model responses (including streamed responses) and
-model reasoning. A separate Python service built on
-[Microsoft Presidio](https://microsoft.github.io/presidio/) decides what counts
-as PII, and the guardrail calls it over HTTP. Both run in Kubernetes, deployed
+for PII. PII in a prompt is masked before it reaches the model
+(`jane@example.com` becomes `<EMAIL_ADDRESS>`), and a model response containing
+PII, streamed or not, including reasoning output, is blocked. A separate Python
+service built on [Microsoft Presidio](https://microsoft.github.io/presidio/)
+decides what counts as PII and what to do, and the guardrail calls it over HTTP. Both run in Kubernetes, deployed
 with Helm, and the service exposes Prometheus metrics. Everything runs locally:
 the model is `deepseek-r1:8b` in Ollama.
 
@@ -99,23 +100,17 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
   -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Spell the word cat backwards. Reply with only the result."}]}'
 ```
 
-Every Presidio entity type blocks except `DATE_TIME` (a date or time isn't PII
-on its own). That includes names, places and nationalities, and these often
-appear in the model's reasoning. For example,
-"Write a haiku about the sea." is often blocked with `PII detected in model
-reasoning: NRP`, because the model reasons about haiku being Japanese. See
-[Configuration](#configuration) to narrow it.
-
-PII in the prompt is blocked before it reaches the model (HTTP 400):
+PII in the prompt is masked before it reaches the model, so the model only sees
+the placeholder. Ask it to repeat the prompt:
 
 ```sh
 curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "My social security number is 219-09-9999"}]}'
-# {"error": {"message": "PII detected in prompt: US_SSN", ...}}
+  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Repeat exactly the text between the quotes, and nothing else: \"my email is jane.doe@example.com\""}]}'
+# ... "content": "... my email is <EMAIL_ADDRESS>" ...
 ```
 
-PII the model writes is blocked too, and a streamed response sends only the error:
+PII the model writes is blocked, and a streamed response sends only the error:
 
 ```sh
 curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
@@ -123,6 +118,13 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
   -d '{"model": "deepseek-r1:8b", "stream": true, "messages": [{"role": "user", "content": "Make up a realistic example email address for a fictional user. Reply with only the address."}]}'
 # data: {"error": {"message": "PII detected in model response: EMAIL_ADDRESS, ...", ...}}
 ```
+
+Every Presidio entity type counts except `DATE_TIME` (a date or time isn't PII
+on its own). That includes names, places and nationalities, which often appear
+in the model's answer or reasoning, so ordinary responses are sometimes
+blocked. For example, "Write a haiku about the sea." is often blocked with `PII
+detected in model reasoning: NRP`, because the model reasons about haiku being
+Japanese. See [Configuration](#configuration) to narrow it.
 
 ### The PII service and its metrics
 
@@ -137,7 +139,7 @@ Ask it directly:
 ```sh
 curl -s localhost:8000/v1/analyze -H 'Content-Type: application/json' \
   -d '{"texts": ["Call John Smith on +44 20 7946 0958"], "source": "request"}'
-# {"block": true, "entities": ["PERSON", "PHONE_NUMBER"]}
+# {"action": "mask", "entities": ["PERSON", "PHONE_NUMBER"], "texts": ["Call <PERSON> on <PHONE_NUMBER>"]}
 ```
 
 See its Prometheus metrics, which count decisions and PII types for the
@@ -148,7 +150,8 @@ curl -s localhost:8000/metrics | grep pii_service_
 ```
 
 Blocked requests also appear in the LiteLLM UI at <http://localhost:4000/ui>
-under **Logs**, with guardrail status `guardrail_intervened`.
+under **Logs**, with guardrail status `guardrail_intervened`. Masked prompts are
+logged with status `success`, the same as clean ones.
 
 ## Configuration
 
@@ -157,7 +160,7 @@ The detection settings are in [`charts/litellm-guardrail/values.yaml`](charts/li
 ```yaml
 piiService:
   scoreThreshold: 0.4    # Presidio confidence needed to count as PII (0-1)
-  ignoredEntities: [DATE_TIME]   # entity types that never block, e.g. add LOCATION, NRP
+  ignoredEntities: [DATE_TIME]   # entity types that are never masked or blocked, e.g. add LOCATION, NRP
 ```
 
 Edit them and run `./scripts/deploy.sh` again. The model and guardrail settings
@@ -204,10 +207,12 @@ kubectl delete namespace litellm
 
 ## Limitations
 
-- Ordinary requests are sometimes blocked because answers and reasoning
+- Ordinary responses are sometimes blocked because answers and reasoning
   contain names, places or nationalities.
-- `DATE_TIME` is ignored, so a date of birth on its own isn't blocked.
+- `DATE_TIME` is ignored, so a date of birth on its own isn't masked or blocked.
+- The model sees placeholders such as `<EMAIL_ADDRESS>`, so it can't use the
+  masked details.
 - Detection uses Presidio's English model.
-- Tool-call arguments aren't checked, and PII is blocked, never masked.
+- Tool-call arguments aren't checked.
 
 See [docs/implementation.md](docs/implementation.md#limitations).

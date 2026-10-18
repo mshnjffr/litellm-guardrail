@@ -1,9 +1,11 @@
 """
-LiteLLM custom guardrails that block prompts, model responses and model
-reasoning containing PII. The PII service (Presidio) makes the decision; these
-guardrails send it the text over HTTP and block when it says so.
+LiteLLM custom guardrails for PII. The PII service (Presidio) makes the
+decision; these guardrails send it the text over HTTP and enforce it: PII in a
+prompt is masked before it reaches the model, and a model response or
+reasoning containing PII is blocked.
 """
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Optional
 
 from fastapi import HTTPException
@@ -20,29 +22,36 @@ Source = Literal["request", "response", "reasoning"]
 LOCATIONS: dict[str, str] = {"request": "prompt", "response": "model response", "reasoning": "model reasoning"}
 
 
+@dataclass(frozen=True)
+class PIIDecision:
+    """The PII service's decision: "allow", "mask" (with the masked texts) or "block"."""
+
+    action: Literal["allow", "mask", "block"]
+    entities: list[str]
+    texts: list[str] | None = None
+
+
 class PIIServiceClient:
-    """Asks the PII service whether texts contain PII."""
+    """Asks the PII service what to do with texts that may contain PII."""
 
     def __init__(self, api_base: str, timeout: float) -> None:
         self.url = f"{api_base.rstrip('/')}/v1/analyze"
         self.timeout = timeout
 
-    async def find_pii(self, texts: list[str], source: Source) -> list[str]:
+    async def decide(self, texts: list[str], source: Source) -> PIIDecision:
         """
-        Return the PII types the service found, or an empty list if the texts
-        are clean. Raises if the service can't be reached or errors, so the
-        call fails closed rather than letting unchecked text through.
+        Raises if the service can't be reached or errors, so the call fails
+        closed rather than letting unchecked text through.
         """
         client = get_async_httpx_client(llm_provider=httpxSpecialProvider.GuardrailCallback)
         response = await client.post(self.url, json={"texts": texts, "source": source}, timeout=self.timeout)
         response.raise_for_status()
-        result = response.json()
-        return result["entities"] if result["block"] else []
+        return PIIDecision(**response.json())
 
 
 class PIIServiceGuardrail(CustomGuardrail):
     """
-    Shared by both guardrails: the PII service client and the block.
+    Shared by both guardrails: the PII service client and enforcing its decision.
 
     `api_base` (the PII service URL) and `timeout` come from the guardrail's
     litellm_params in config.yaml.
@@ -52,17 +61,29 @@ class PIIServiceGuardrail(CustomGuardrail):
         super().__init__(**kwargs)
         self.pii_service = PIIServiceClient(api_base, timeout=self.timeout or 10)
 
-    async def block_if_pii(self, texts: list[str], source: Source) -> None:
-        """Raise the 400 that LiteLLM records as a guardrail intervention. Names the PII types, never the values."""
+    async def enforce(self, texts: list[str], source: Source) -> list[str]:
+        """
+        Return the texts to send on: masked if the service masked them, otherwise
+        unchanged. If the service blocks them, raise the 400 that LiteLLM records
+        as a guardrail intervention, naming the PII types but never the values.
+        """
         if not texts:
-            return
-        found = await self.pii_service.find_pii(texts, source)
-        if found:
-            raise HTTPException(status_code=400, detail=f"PII detected in {LOCATIONS[source]}: {', '.join(found)}")
+            return texts
+        decision = await self.pii_service.decide(texts, source)
+        if decision.action == "block":
+            raise HTTPException(status_code=400, detail=f"PII detected in {LOCATIONS[source]}: {', '.join(decision.entities)}")
+        return decision.texts if decision.action == "mask" else texts
 
 
 class PIIGuardrail(PIIServiceGuardrail):
-    """Blocks the call if the prompt (pre_call) or the model response (post_call) contains PII."""
+    """
+    Masks PII in the prompt (pre_call), and blocks the call if the model
+    response (post_call) contains PII.
+
+    Masking rather than blocking prompts matters for chat: clients resend the
+    whole conversation each turn, so a blocked message would block every later
+    turn too. A masked message is masked again each time, so the chat carries on.
+    """
 
     # Makes LiteLLM hold a streamed response until it has been fully scanned,
     # so PII is never sent to the client before the block.
@@ -75,7 +96,8 @@ class PIIGuardrail(PIIServiceGuardrail):
         input_type: Literal["request", "response"],
         logging_obj: Optional["LiteLLMLoggingObj"] = None,
     ) -> GenericGuardrailAPIInputs:
-        await self.block_if_pii(inputs.get("texts") or [], input_type)
+        if texts := inputs.get("texts"):
+            inputs["texts"] = await self.enforce(texts, input_type)
         return inputs
 
 
@@ -97,4 +119,4 @@ class PIIReasoningGuardrail(PIIServiceGuardrail):
             for choice in getattr(response, "choices", [])
             if isinstance(choice, Choices) and getattr(choice.message, "reasoning_content", None)
         ]
-        await self.block_if_pii(reasoning, "reasoning")
+        await self.enforce(reasoning, "reasoning")

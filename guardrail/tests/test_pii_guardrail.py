@@ -27,7 +27,7 @@ class StubPIIService:
 
     def __init__(self):
         self.requests = []
-        self.decision = {"block": False, "entities": []}
+        self.decision = {"action": "allow", "entities": [], "texts": None}
         self.status = 200
         stub = self
 
@@ -58,8 +58,11 @@ class GuardrailTestCase(unittest.IsolatedAsyncioTestCase):
         self.service = StubPIIService()
         self.addCleanup(self.service.close)
 
-    def flag(self, *entities):
-        self.service.decision = {"block": True, "entities": list(entities)}
+    def block(self, *entities):
+        self.service.decision = {"action": "block", "entities": list(entities), "texts": None}
+
+    def mask(self, entities, texts):
+        self.service.decision = {"action": "mask", "entities": entities, "texts": texts}
 
 
 class PIIGuardrailTest(GuardrailTestCase):
@@ -77,15 +80,20 @@ class PIIGuardrailTest(GuardrailTestCase):
     async def test_allows_clean_text_unchanged(self):
         self.assertEqual(await self.apply(["What is 2 + 2?"]), {"texts": ["What is 2 + 2?"]})
 
-    async def test_blocks_pii_in_the_prompt(self):
-        self.flag("EMAIL_ADDRESS", "PERSON")
+    async def test_masks_the_prompt_when_the_service_masks_it(self):
+        self.mask(["EMAIL_ADDRESS", "PERSON"], ["Email <PERSON> at <EMAIL_ADDRESS>", "hi"])
+        inputs = await self.apply(["Email John at john@example.com", "hi"])
+        self.assertEqual(inputs["texts"], ["Email <PERSON> at <EMAIL_ADDRESS>", "hi"])
+
+    async def test_blocks_the_prompt_when_the_service_blocks_it(self):
+        self.block("EMAIL_ADDRESS")
         with self.assertRaises(HTTPException) as ctx:
-            await self.apply(["Email John at john@example.com"])
+            await self.apply(["My email is jane@", "example.com"])
         self.assertEqual(ctx.exception.status_code, 400)
-        self.assertEqual(ctx.exception.detail, "PII detected in prompt: EMAIL_ADDRESS, PERSON")
+        self.assertEqual(ctx.exception.detail, "PII detected in prompt: EMAIL_ADDRESS")
 
     async def test_blocks_pii_in_the_response(self):
-        self.flag("US_SSN")
+        self.block("US_SSN")
         with self.assertRaises(HTTPException) as ctx:
             await self.apply(["219-09-9999"], input_type="response")
         self.assertEqual(ctx.exception.detail, "PII detected in model response: US_SSN")
@@ -125,7 +133,7 @@ class PIIReasoningGuardrailTest(GuardrailTestCase):
         self.assertEqual(self.service.requests, [{"texts": ["Thinking it over."], "source": "reasoning"}])
 
     async def test_blocks_pii_in_the_reasoning(self):
-        self.flag("EMAIL_ADDRESS")
+        self.block("EMAIL_ADDRESS")
         with self.assertRaises(HTTPException) as ctx:
             await self.check("done", "The address is john@example.com.")
         self.assertEqual(ctx.exception.detail, "PII detected in model reasoning: EMAIL_ADDRESS")
