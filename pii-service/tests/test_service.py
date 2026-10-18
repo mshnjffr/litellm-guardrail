@@ -111,10 +111,47 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(PIIDetector(Settings(score_threshold=0.9), analyzer).decide(text, "response").action, "allow")
 
     def test_reads_settings_from_environment(self):
-        env = {"PII_SCORE_THRESHOLD": "0.7", "PII_IGNORED_ENTITIES": "location, date_time", "PII_LANGUAGE": "en"}
+        env = {
+            "PII_SCORE_THRESHOLD": "0.7",
+            "PII_IGNORED_ENTITIES": "location, date_time",
+            "PII_RESPONSE_IGNORED_ENTITIES": "person,nrp",
+            "PII_LANGUAGE": "en",
+        }
         with unittest.mock.patch.dict("os.environ", env):
             settings = Settings.from_env()
-        self.assertEqual(settings, Settings(0.7, frozenset({"LOCATION", "DATE_TIME"}), "en"))
+        self.assertEqual(
+            settings,
+            Settings(
+                score_threshold=0.7,
+                ignored_entities=frozenset({"LOCATION", "DATE_TIME"}),
+                response_ignored_entities=frozenset({"PERSON", "NRP"}),
+                language="en",
+            ),
+        )
+
+
+class ResponseIgnoredEntitiesTest(unittest.TestCase):
+    """Names and places are masked in prompts, but don't block responses."""
+
+    def setUp(self):
+        self.detector = PIIDetector(Settings(response_ignored_entities=frozenset({"PERSON", "LOCATION", "NRP"})), analyzer)
+
+    def test_allows_public_names_and_places_in_responses(self):
+        answer = ["The sky is blue because of Rayleigh scattering in the Earth's atmosphere, explained by Lord Rayleigh."]
+        for source in ("response", "reasoning"):
+            with self.subTest(source=source):
+                self.assertEqual(self.detector.decide(answer, source).action, "allow")
+
+    def test_still_blocks_identifiers_in_responses(self):
+        decision = self.detector.decide(["Lord Rayleigh's email was rayleigh@example.com"], "response")
+        self.assertEqual(decision.action, "block")
+        self.assertIn("EMAIL_ADDRESS", decision.entities)
+        self.assertNotIn("PERSON", decision.entities)
+
+    def test_still_masks_names_and_places_in_prompts(self):
+        decision = self.detector.decide(["John Smith lives in London"], "request")
+        self.assertEqual(decision.action, "mask")
+        self.assertEqual(decision.texts, ["<PERSON> lives in <LOCATION>"])
 
 
 if __name__ == "__main__":

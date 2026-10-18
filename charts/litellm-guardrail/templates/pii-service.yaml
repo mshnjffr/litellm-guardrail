@@ -35,6 +35,8 @@ spec:
               value: {{ .Values.piiService.scoreThreshold | quote }}
             - name: PII_IGNORED_ENTITIES
               value: {{ join "," .Values.piiService.ignoredEntities | quote }}
+            - name: PII_RESPONSE_IGNORED_ENTITIES
+              value: {{ join "," .Values.piiService.responseIgnoredEntities | quote }}
           # The service only answers once the spaCy model has loaded.
           startupProbe:
             httpGet:

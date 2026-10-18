@@ -107,7 +107,7 @@ The decision depends on `source`:
 | --- | --- | --- |
 | `request` (the prompt) | in a text | `mask`, with each piece of PII replaced by its type using Presidio's anonymizer |
 | `request` | split across texts (`"jane@"` + `"example.com"`) | `block`, because it can't be masked in place |
-| `response`, `reasoning` | anywhere | `block` |
+| `response`, `reasoning` | anywhere, except types in `PII_RESPONSE_IGNORED_ENTITIES` | `block` |
 | any | none | `allow` |
 
 
@@ -117,6 +117,12 @@ The decision depends on `source`:
   `PII_IGNORED_ENTITIES`. The Helm chart ignores `DATE_TIME`: a date or time
   isn't PII on its own, and model reasoning almost always contains one ("today",
   "a moment"), so it blocked most responses.
+- Responses are checked for fewer types: those in
+  `PII_RESPONSE_IGNORED_ENTITIES` are masked in prompts but don't block
+  responses. The Helm chart sets `PERSON`, `LOCATION` and `NRP`, because
+  ordinary answers name public people and places ("Rayleigh scattering,
+  explained by Lord Rayleigh", "the Earth's atmosphere"), and blocking those
+  blocked most answers.
 - A match counts only if Presidio's confidence is at least `PII_SCORE_THRESHOLD`
   (default 0.4). Presidio scores phone numbers at 0.4, so a higher default would
   miss them, while very weak matches (0.01 to 0.05, such as any 9-digit number)
@@ -228,7 +234,8 @@ content, where `PIIGuardrail` checks it. Clients then see the reasoning inside
   directory its `config.yaml` is in. The code is passed at install time with
   `--set-file guardrailCode=guardrail/pii_guardrail.py`.
 - **The PII service** Deployment and Service, with its detection settings as
-  values (`piiService.scoreThreshold`, `piiService.ignoredEntities`).
+  values (`piiService.scoreThreshold`, `piiService.ignoredEntities`,
+  `piiService.responseIgnoredEntities`).
 
 [`scripts/deploy.sh`](../scripts/deploy.sh) builds the PII service image, loads
 it into the cluster, and installs or upgrades the release.
@@ -242,14 +249,15 @@ it into the cluster, and installs or upgrades the release.
 | Raise `HTTPException(400)` to block | LiteLLM logs it as `guardrail_intervened`, a policy block. A plain `Exception` would return a 500 and be logged as `guardrail_failed_to_respond`. |
 | `default_on: true` | Runs on every request, so clients can't skip it. |
 | Mask prompts, block responses | Masking prompts keeps chats usable (see Request flow). Responses are blocked rather than masked because masking a streamed response only works on `/v1/chat/completions`: on other routes LiteLLM drops a guardrail's rewrite and would send the original text. |
-| Every Presidio entity type counts, except `DATE_TIME` | This gives LiteLLM Presidio's full coverage. It's broad: names, places and nationalities count too, so they're masked in prompts and block responses, including the model's reasoning. `DATE_TIME` is ignored because dates aren't PII on their own and appear in almost every response. `piiService.ignoredEntities` changes this without code changes. |
+| Every Presidio entity type counts in prompts, except `DATE_TIME` | This gives LiteLLM Presidio's full coverage for what users send. `DATE_TIME` is ignored because dates aren't PII on their own and appear in almost every response. |
+| Names, places and nationalities don't block responses | Masking them in prompts costs little: the model still answers. Blocking them in responses blocked most ordinary answers, which usually name public people and places. Identifiers (emails, phone numbers, card numbers…) still block. Both lists are Helm values, so this changes without code changes. |
 | Pin LiteLLM 1.105.1 | The guardrail depends on behaviour of this release: how the file is loaded, the streaming setting, and which hooks run. |
 
 ## Limitations
 
-- Ordinary responses are sometimes blocked: model answers and reasoning often
-  contain names, places or nationalities. Add those types to
-  `piiService.ignoredEntities` if that's too strict.
+- A response that names a private person or their address isn't blocked,
+  because `PERSON` and `LOCATION` don't block responses. The user's own details
+  are still masked in prompts.
 - `DATE_TIME` is ignored, so a date of birth on its own isn't masked or blocked.
 - The model sees placeholders such as `<EMAIL_ADDRESS>`, so it can't use the
   masked details, for example to write a reply addressed to that email.

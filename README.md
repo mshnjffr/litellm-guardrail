@@ -123,12 +123,13 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
 # data: {"error": {"message": "PII detected in model response: EMAIL_ADDRESS, ...", ...}}
 ```
 
-Every Presidio entity type counts except `DATE_TIME` (a date or time isn't PII
-on its own). That includes names, places and nationalities, which often appear
-in the model's answer or reasoning, so ordinary responses are sometimes
-blocked. For example, "Write a haiku about the sea." is often blocked with `PII
-detected in model reasoning: NRP`, because the model reasons about haiku being
-Japanese. See [Configuration](#configuration) to narrow it.
+Prompts are masked for every Presidio entity type except `DATE_TIME` (a date or
+time isn't PII on its own), including names, places and nationalities.
+Responses are blocked for identifiers such as emails, phone numbers and card
+numbers, but not for names, places or nationalities (`PERSON`, `LOCATION`,
+`NRP`). Those appear in most ordinary answers ("Rayleigh scattering, explained by
+Lord Rayleigh") and are almost always public knowledge. See
+[Configuration](#configuration) to change this.
 
 ### The PII service and its metrics
 
@@ -184,7 +185,8 @@ The detection settings are in [`charts/litellm-guardrail/values.yaml`](charts/li
 ```yaml
 piiService:
   scoreThreshold: 0.4    # Presidio confidence needed to count as PII (0-1)
-  ignoredEntities: [DATE_TIME]   # entity types that are never masked or blocked, e.g. add LOCATION, NRP
+  ignoredEntities: [DATE_TIME]                       # never masked or blocked
+  responseIgnoredEntities: [PERSON, LOCATION, NRP]   # masked in prompts, but don't block responses
 ```
 
 Edit them and run `./scripts/deploy.sh` again. The model and guardrail settings
@@ -231,8 +233,8 @@ kubectl delete namespace litellm
 
 ## Limitations
 
-- Ordinary responses are sometimes blocked because answers and reasoning
-  contain names, places or nationalities.
+- A response that names a private person or their address isn't blocked,
+  because `PERSON` and `LOCATION` don't block responses. Prompts are still masked.
 - `DATE_TIME` is ignored, so a date of birth on its own isn't masked or blocked.
 - The model sees placeholders such as `<EMAIL_ADDRESS>`, so it can't use the
   masked details.

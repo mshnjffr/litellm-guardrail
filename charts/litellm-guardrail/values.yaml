@@ -15,6 +15,10 @@ piiService:
   # own, and model reasoning almost always contains one ("today", "a moment"),
   # so it would block most responses.
   ignoredEntities: [DATE_TIME]
+  # Entity types that are masked in prompts but don't block responses. Names,
+  # places and nationalities in an answer are almost always public knowledge
+  # ("Lord Rayleigh", "Earth"), and blocking them blocks most ordinary answers.
+  responseIgnoredEntities: [PERSON, LOCATION, NRP]
   resources:
     requests:
       cpu: 250m

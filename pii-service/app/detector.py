@@ -27,17 +27,26 @@ class Settings:
     # Presidio scores phone numbers at 0.4, so a higher default would miss them.
     # Very weak pattern matches (0.01-0.05, e.g. any 9-digit number) stay below it.
     score_threshold: float = 0.4
+    # Entity types that are never masked or blocked.
     ignored_entities: frozenset[str] = field(default_factory=frozenset)
+    # Entity types that are masked in prompts but don't block responses, such as
+    # PERSON: answers often name public figures ("Lord Rayleigh").
+    response_ignored_entities: frozenset[str] = field(default_factory=frozenset)
     language: str = "en"
 
     @classmethod
     def from_env(cls) -> "Settings":
-        ignored = os.environ.get("PII_IGNORED_ENTITIES", "")
         return cls(
             score_threshold=float(os.environ.get("PII_SCORE_THRESHOLD", cls.score_threshold)),
-            ignored_entities=frozenset(name.strip().upper() for name in ignored.split(",") if name.strip()),
+            ignored_entities=_entity_list(os.environ.get("PII_IGNORED_ENTITIES", "")),
+            response_ignored_entities=_entity_list(os.environ.get("PII_RESPONSE_IGNORED_ENTITIES", "")),
             language=os.environ.get("PII_LANGUAGE", cls.language),
         )
+
+
+def _entity_list(value: str) -> frozenset[str]:
+    """Parse a comma-separated list of entity types, e.g. "person, location"."""
+    return frozenset(name.strip().upper() for name in value.split(",") if name.strip())
 
 
 @dataclass(frozen=True)
@@ -56,7 +65,8 @@ class Decision:
 class PIIDetector:
     """
     Decides what to do with texts that may contain PII, using every recognizer
-    Presidio has for the language, minus any ignored entity types.
+    Presidio has for the language, minus any ignored entity types. Responses are
+    checked for fewer types than prompts (see `response_ignored_entities`).
     """
 
     def __init__(self, settings: Settings, analyzer: AnalyzerEngine | None = None) -> None:
@@ -66,42 +76,45 @@ class PIIDetector:
         self.entities = sorted(
             set(self.analyzer.get_supported_entities(settings.language)) - settings.ignored_entities
         )
+        self.response_entities = sorted(set(self.entities) - settings.response_ignored_entities)
 
     def decide(self, texts: list[str], source: Source) -> Decision:
         if source == "request":
             return self._mask(texts)
-        found = sorted({result.entity_type for text in texts for result in self._analyze(text)} | self._split_pii(texts))
-        return Decision("block" if found else "allow", found)
+        entities = self.response_entities
+        found = {result.entity_type for text in texts for result in self._analyze(text, entities)}
+        found |= self._split_pii(texts, entities)
+        return Decision("block" if found else "allow", sorted(found))
 
     def _mask(self, texts: list[str]) -> Decision:
         """Mask the PII in each text, e.g. "jane@example.com" -> "<EMAIL_ADDRESS>"."""
-        results = [self._analyze(text) for text in texts]
+        results = [self._analyze(text, self.entities) for text in texts]
         entities = {result.entity_type for found in results for result in found}
 
         # PII split across message parts ("jane@" + "example.com") can't be
         # masked in place, so that prompt is blocked instead.
-        if split := self._split_pii(texts):
+        if split := self._split_pii(texts, self.entities):
             return Decision("block", sorted(entities | split))
         if not entities:
             return Decision("allow", [])
         masked = [self.anonymizer.anonymize(text, found).text if found else text for text, found in zip(texts, results)]
         return Decision("mask", sorted(entities), masked)
 
-    def _split_pii(self, texts: list[str]) -> set[str]:
+    def _split_pii(self, texts: list[str], entities: list[str]) -> set[str]:
         """PII types found in the joined texts that cross from one text into the next."""
         if len(texts) < 2:
             return set()
         boundaries = list(accumulate(len(text) for text in texts))[:-1]
         return {
             result.entity_type
-            for result in self._analyze("".join(texts))
+            for result in self._analyze("".join(texts), entities)
             if any(result.start < boundary < result.end for boundary in boundaries)
         }
 
-    def _analyze(self, text: str) -> list[RecognizerResult]:
+    def _analyze(self, text: str, entities: list[str]) -> list[RecognizerResult]:
         return self.analyzer.analyze(
             text=text,
             language=self.settings.language,
-            entities=self.entities,
+            entities=entities,
             score_threshold=self.settings.score_threshold,
         )
