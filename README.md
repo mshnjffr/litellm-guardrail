@@ -121,6 +121,7 @@ curl -s localhost:4000/guardrails/apply_guardrail -H "Authorization: Bearer $LIT
 Every response carries an `x-litellm-applied-guardrails` header. Blocked
 requests appear in the UI at <http://localhost:4000/ui> (user `admin`, password
 `LITELLM_MASTER_KEY`) under **Logs**, with guardrail status `guardrail_intervened`.
+Masked prompts are logged with status `success`, the same as clean ones.
 
 ## Run the tests
 
