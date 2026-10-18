@@ -1,6 +1,7 @@
 """
-LiteLLM custom guardrails that block prompts and model responses containing PII
-(email addresses and US Social Security numbers).
+LiteLLM custom guardrails for PII (email addresses and US Social Security
+numbers): PII in a prompt is masked before it reaches the model, and a model
+response containing PII is blocked.
 """
 
 import re
@@ -41,6 +42,12 @@ class PIIDetector:
         """
         return sorted({name for text in [*texts, "".join(texts)] for name in self.detect(text)})
 
+    def mask(self, text: str) -> str:
+        """Replace each piece of PII with its type, e.g. "jane@example.com" -> "<EMAIL>"."""
+        for name, pattern in self.PATTERNS.items():
+            text = pattern.sub(f"<{name.upper()}>", text)
+        return text
+
 
 def pii_blocked_error(found: list[str], location: str) -> HTTPException:
     """The 400 that LiteLLM records as a guardrail intervention. Names the PII types, never the values."""
@@ -48,7 +55,14 @@ def pii_blocked_error(found: list[str], location: str) -> HTTPException:
 
 
 class PIIGuardrail(CustomGuardrail):
-    """Blocks the call if the prompt (pre_call) or the model response (post_call) contains PII."""
+    """
+    Masks PII in the prompt (pre_call), and blocks the call if the model
+    response (post_call) contains PII.
+
+    Masking rather than blocking prompts matters for chat: clients resend the
+    whole conversation each turn, so a blocked message would block every later
+    turn too. A masked message is masked again each time, so the chat carries on.
+    """
 
     detector = PIIDetector()
 
@@ -63,10 +77,22 @@ class PIIGuardrail(CustomGuardrail):
         input_type: Literal["request", "response"],
         logging_obj: Optional["LiteLLMLoggingObj"] = None,
     ) -> GenericGuardrailAPIInputs:
-        found = self.detector.detect_all(inputs.get("texts") or [])
-        if found:
-            raise pii_blocked_error(found, "prompt" if input_type == "request" else "model response")
+        texts = inputs.get("texts") or []
+        if not texts:
+            return inputs
+        if input_type == "request":
+            inputs["texts"] = self._mask_prompt(texts)
+        elif found := self.detector.detect_all(texts):
+            raise pii_blocked_error(found, "model response")
         return inputs
+
+    def _mask_prompt(self, texts: list[str]) -> list[str]:
+        masked = [self.detector.mask(text) for text in texts]
+        # PII split across message parts ("jane@" + "example.com") can't be
+        # masked in place, so that prompt is blocked instead.
+        if found := self.detector.detect("".join(masked)):
+            raise pii_blocked_error(found, "prompt")
+        return masked
 
 
 class PIIReasoningGuardrail(CustomGuardrail):

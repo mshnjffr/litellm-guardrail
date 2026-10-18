@@ -1,8 +1,9 @@
 # LiteLLM PII guardrail
 
 A [custom LiteLLM guardrail](https://docs.litellm.ai/docs/proxy/guardrails/custom_guardrail)
-that blocks email addresses and US Social Security numbers in prompts and in
-model responses, including streamed responses and reasoning output. It runs
+for email addresses and US Social Security numbers. PII in a prompt is masked
+before it reaches the model (`jane@example.com` becomes `<EMAIL>`), and a model
+response containing PII, streamed or not, including reasoning output, is blocked. It runs
 entirely on your machine: LiteLLM and Postgres in Docker, and the
 `deepseek-r1:8b` model in Ollama.
 
@@ -89,13 +90,14 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
   -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "What is the capital of France? One word."}]}'
 ```
 
-PII in the prompt is blocked before it reaches the model (HTTP 400):
+PII in the prompt is masked before it reaches the model, so the model only sees
+`<EMAIL>`. Ask it to repeat the prompt:
 
 ```sh
 curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Send the report to jane.doe@example.com"}]}'
-# {"error": {"message": "PII detected in prompt: email", ...}}
+  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Repeat exactly the text between the quotes, and nothing else: \"my email is jane.doe@example.com\""}]}'
+# ... "content": "... my email is <EMAIL>" ...
 ```
 
 PII in the model's response is blocked too. Here the model writes the SSN,
@@ -108,11 +110,12 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
 # data: {"error": {"message": "PII detected in model response: us_ssn", ...}}
 ```
 
-To test the guardrail without calling the model:
+To test the masking without calling the model:
 
 ```sh
 curl -s localhost:4000/guardrails/apply_guardrail -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' -d '{"guardrail_name": "pii-guardrail", "text": "my SSN is 123-45-6789"}'
+# {"response_text": "my SSN is <US_SSN>"}
 ```
 
 Every response carries an `x-litellm-applied-guardrails` header. Blocked

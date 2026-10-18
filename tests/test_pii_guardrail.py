@@ -1,5 +1,5 @@
 """
-Tests for the PII detector and the reasoning guardrail. Run inside the LiteLLM
+Tests for the PII detector and the guardrails. Run inside the LiteLLM
 container, where this repo is mounted at /app/custom:
 
     docker compose exec litellm python -m unittest discover -s /app/custom/tests -v
@@ -16,7 +16,7 @@ from litellm import ModelResponse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pii_guardrail import PIIDetector, PIIReasoningGuardrail  # noqa: E402
+from pii_guardrail import PIIDetector, PIIGuardrail, PIIReasoningGuardrail  # noqa: E402
 
 
 class PIIRegexTest(unittest.TestCase):
@@ -83,6 +83,50 @@ class PIIDetectAllTest(unittest.TestCase):
 
     def test_handles_no_texts(self):
         self.assertEqual(self.detector.detect_all([]), [])
+
+
+class PIIMaskTest(unittest.TestCase):
+    def setUp(self):
+        self.detector = PIIDetector()
+
+    def test_masks_each_pii_type(self):
+        self.assertEqual(
+            self.detector.mask("Email jane@example.com or a@b.io, SSN 219-09-9999."),
+            "Email <EMAIL> or <EMAIL>, SSN <US_SSN>.",
+        )
+
+    def test_leaves_text_without_pii_unchanged(self):
+        self.assertEqual(self.detector.mask("What is 2 + 2?"), "What is 2 + 2?")
+
+
+class PIIGuardrailTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.guardrail = PIIGuardrail(guardrail_name="pii-test", event_hook=["pre_call", "post_call"])
+
+    async def apply(self, texts, input_type="request"):
+        return await self.guardrail.apply_guardrail(inputs={"texts": texts}, request_data={}, input_type=input_type)
+
+    async def test_masks_pii_in_the_prompt(self):
+        inputs = await self.apply(["how are you? testuser@gmail.com", "hi"])
+        self.assertEqual(inputs["texts"], ["how are you? <EMAIL>", "hi"])
+
+    async def test_passes_a_clean_prompt_unchanged(self):
+        self.assertEqual(await self.apply(["What is 2 + 2?"]), {"texts": ["What is 2 + 2?"]})
+
+    async def test_blocks_pii_split_across_prompt_parts(self):
+        with self.assertRaises(HTTPException) as ctx:
+            await self.apply(["my email is jane@", "example.com"])
+        self.assertEqual(ctx.exception.detail, "PII detected in prompt: email")
+
+    async def test_blocks_pii_in_the_response(self):
+        with self.assertRaises(HTTPException) as ctx:
+            await self.apply(["Sure: 219-09-9999"], input_type="response")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.detail, "PII detected in model response: us_ssn")
+
+    async def test_passes_inputs_without_text(self):
+        inputs = await self.guardrail.apply_guardrail(inputs={}, request_data={}, input_type="request")
+        self.assertEqual(inputs, {})
 
 
 class PIIReasoningGuardrailTest(unittest.IsolatedAsyncioTestCase):

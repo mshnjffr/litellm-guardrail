@@ -17,10 +17,10 @@ flowchart LR
         subgraph compose["Docker Compose"]
             subgraph proxy["LiteLLM proxy, localhost:4000<br/>loads config.yaml + pii_guardrail.py from this repo"]
                 direction LR
-                pre["pii-guardrail<br/>pre_call: scans the prompt"]
+                pre["pii-guardrail<br/>pre_call: masks PII in the prompt"]
                 router["Router<br/>deepseek-r1:8b"]
                 post["pii-guardrail + pii-reasoning-guardrail<br/>post_call: scan the response and reasoning"]
-                pre -- clean --> router
+                pre -- masked prompt --> router
                 router --> post
             end
             db[("Postgres<br/>keys, spend and guardrail logs")]
@@ -31,7 +31,6 @@ flowchart LR
     client -- "POST /v1/chat/completions" --> pre
     router <-- "host.docker.internal:11434" --> ollama
     post -- "200, or 400 if PII" --> client
-    pre -. "400 if PII" .-> client
     proxy -. "guardrail results" .-> db
 ```
 
@@ -48,21 +47,27 @@ sequenceDiagram
 
     C->>L: POST /v1/chat/completions
     L->>G: apply_guardrail(texts, input_type="request")
-    alt PII in the prompt
-        G-->>L: HTTPException(400)
-        L-->>C: 400 "PII detected in prompt: email"
-    else clean prompt
-        L->>O: chat request
-        O-->>L: content + reasoning_content
-        L->>G: apply_guardrail(texts, input_type="response")
-        L->>R: async_post_call_success_hook(response)
-        alt PII in the response or reasoning
-            L-->>C: 400 "PII detected in model response: us_ssn"
-        else clean response
-            L-->>C: 200 with the model's answer
-        end
+    G-->>L: texts with PII masked ("jane@example.com" -> "<EMAIL>")
+    L->>O: chat request with the masked prompt
+    O-->>L: content + reasoning_content
+    L->>G: apply_guardrail(texts, input_type="response")
+    L->>R: async_post_call_success_hook(response)
+    alt PII in the response or reasoning
+        L-->>C: 400 "PII detected in model response: us_ssn"
+    else clean response
+        L-->>C: 200 with the model's answer
     end
 ```
+
+Prompts are masked rather than blocked because chat clients resend the whole
+conversation every turn. A blocked message would stay in the history and block
+every later turn, until the user cleared the chat. A masked message is masked
+again each turn, so the conversation carries on and the model never sees the PII.
+
+Responses are still blocked. With the prompt masked, the model rarely has PII to
+repeat, but it can still produce some, from its training data for example. And a
+blocked response doesn't get stuck: the client keeps only the error, which
+contains no PII.
 
 For streamed responses, LiteLLM holds the chunks until the whole response has
 been scanned (`streaming_buffer_until_moderated`), so a blocked response sends
@@ -85,6 +90,7 @@ class PIIDetector:
 
     def detect(self, text: str) -> list[str]: ...
     def detect_all(self, texts: list[str]) -> list[str]: ...
+    def mask(self, text: str) -> str: ...      # "jane@example.com" -> "<EMAIL>"
 ```
 
 - **SSN:** the regex rejects numbers that are never issued (area `000`, `666`
@@ -96,6 +102,8 @@ class PIIDetector:
   milliseconds.
 - **`detect_all`:** checks each text and also all of them joined, so PII split
   across message parts (`"jane@"` + `"example.com"`) is still caught.
+- **`mask`:** replaces each piece of PII with its type, such as `<EMAIL>` or
+  `<US_SSN>`.
 
 ### 2. A guardrail class that implements `apply_guardrail`
 
@@ -109,13 +117,21 @@ class PIIGuardrail(CustomGuardrail):
     streaming_buffer_until_moderated = True
 
     async def apply_guardrail(self, inputs, request_data, input_type, logging_obj=None):
-        found = self.detector.detect_all(inputs.get("texts") or [])
-        if found:
-            raise pii_blocked_error(found, "prompt" if input_type == "request" else "model response")
+        texts = inputs.get("texts") or []
+        if not texts:
+            return inputs
+        if input_type == "request":
+            inputs["texts"] = self._mask_prompt(texts)
+        elif found := self.detector.detect_all(texts):
+            raise pii_blocked_error(found, "model response")
         return inputs
 ```
 
-Returning `inputs` allows the call. Raising blocks it.
+Returning `inputs` with edited `texts` masks the call: LiteLLM writes the texts
+back into the request before sending it to the model, on every endpoint
+(chat completions, `/v1/messages`, the Responses API). Raising blocks the call.
+PII split across message parts can't be masked in place, so that prompt is
+blocked instead.
 
 ### 3. A second class for reasoning output
 
@@ -168,7 +184,8 @@ mount can make the file vanish from the running container.
 | Decision | Why |
 | --- | --- |
 | Raise `HTTPException(400)`, not `Exception` | The docs' plain `Exception` returns a 500 and is logged as `guardrail_failed_to_respond`, as if the guardrail had broken. A 400 is logged as `guardrail_intervened`: a policy block. |
-| Name the PII types, never the values | Blocked responses and logs don't repeat the PII. |
+| Mask prompts, block responses | Masking prompts keeps chats usable (see Request flow). Responses are blocked rather than masked because masking a streamed response only works on `/v1/chat/completions`: on other routes LiteLLM drops a guardrail's rewrite and would send the original text. |
+| Name the PII types, never the values | Masked prompts, blocked responses and logs don't repeat the PII. |
 | `streaming_buffer_until_moderated = True` | Without it, `post_call` on a streamed response only runs after the content has reached the client. |
 | Pin `litellm:v1.105.1` | The guardrails depend on behaviour of this release: how the file is loaded, the streaming setting, and which hooks run. |
 
@@ -178,4 +195,5 @@ mount can make the file vanish from the running container.
   stop someone deliberately avoiding it (`jane at example dot com`,
   `123 45 6789`).
 - Only message text and reasoning are scanned, not tool-call arguments.
-- It blocks and never masks.
+- The model sees placeholders such as `<EMAIL>`, so it can't use the masked
+  details, for example to write a reply addressed to that email.
