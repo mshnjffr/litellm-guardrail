@@ -179,6 +179,28 @@ and starts LiteLLM with `--config /app/custom/config.yaml`. The whole directory
 is mounted rather than single files: on Docker Desktop, editing a single-file
 mount can make the file vanish from the running container.
 
+### 6. Metrics
+
+`config.yaml` turns on LiteLLM's Prometheus callback, which counts every
+guardrail call, custom guardrails included:
+
+```yaml
+litellm_settings:
+  callbacks: ["prometheus"]
+  require_auth_for_metrics_endpoint: false
+```
+
+`litellm_guardrail_requests_total`, `litellm_guardrail_latency_seconds` and
+`litellm_guardrail_errors_total` are labelled by guardrail name and hook
+(`pre_call`, `post_call`). LiteLLM counts a block as `status="error"`, with
+`error_type="HTTPException"`. A real failure has a different error type, which is
+how the two can be told apart. Masked prompts count as `success`, since masking
+isn't a failure.
+
+In version 1.105.1, `/metrics` requires the master key unless
+`require_auth_for_metrics_endpoint` is `false`. That's acceptable here because
+the gateway only listens on this machine.
+
 ## Design decisions
 
 | Decision | Why |

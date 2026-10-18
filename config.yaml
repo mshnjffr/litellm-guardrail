@@ -25,3 +25,10 @@ guardrails:
       guardrail: pii_guardrail.PIIReasoningGuardrail
       mode: post_call
       default_on: true
+
+litellm_settings:
+  # Prometheus metrics at /metrics/, including litellm_guardrail_* for both guardrails.
+  callbacks: ["prometheus"]
+  # Lets Prometheus scrape without the master key. The gateway listens on this
+  # machine only; keep authentication on if it's ever exposed further.
+  require_auth_for_metrics_endpoint: false

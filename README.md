@@ -123,6 +123,25 @@ requests appear in the UI at <http://localhost:4000/ui> (user `admin`, password
 `LITELLM_MASTER_KEY`) under **Logs**, with guardrail status `guardrail_intervened`.
 Masked prompts are logged with status `success`, the same as clean ones.
 
+## Prometheus metrics
+
+LiteLLM serves Prometheus metrics at <http://localhost:4000/metrics/> (note the
+trailing slash; `/metrics` redirects there). The guardrail metrics are:
+
+```sh
+curl -s localhost:4000/metrics/ | grep '^litellm_guardrail'
+```
+
+| Metric | What it counts |
+| --- | --- |
+| `litellm_guardrail_requests_total` | Calls to each guardrail, by `hook_type` (`pre_call`, `post_call`) and `status` |
+| `litellm_guardrail_latency_seconds` | How long each guardrail takes |
+| `litellm_guardrail_errors_total` | Guardrail errors, by `error_type` |
+
+LiteLLM counts a block as an error: `status="error"` with
+`error_type="HTTPException"`. A real guardrail failure has a different
+`error_type`. Masked prompts count as `success`, the same as clean ones.
+
 ## Run the tests
 
 ```sh
