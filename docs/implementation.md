@@ -148,9 +148,11 @@ class PIIReasoningGuardrail(CustomGuardrail):
         ...  # scan choice.message.reasoning_content
 ```
 
-This hook only runs on non-streamed responses. For streamed ones, the model
-setting `merge_reasoning_content_in_choices: true` moves the reasoning into the
-content, where `PIIGuardrail` scans it.
+This hook can only block non-streamed responses: on a stream, LiteLLM calls it
+after the content has been sent. For streamed responses, the model setting
+`merge_reasoning_content_in_choices: true` moves the reasoning into the content,
+where `PIIGuardrail` scans it before anything is sent. Clients then see the
+reasoning inside `<think>` tags in the content.
 
 ### 4. Register the guardrails in `config.yaml`
 
@@ -182,7 +184,8 @@ mount can make the file vanish from the running container.
 ### 6. Metrics
 
 `config.yaml` turns on LiteLLM's Prometheus callback, which counts every
-guardrail call, custom guardrails included:
+guardrail call, custom guardrails included, and serves the metrics at
+`/metrics/` (`/metrics` redirects there):
 
 ```yaml
 litellm_settings:
@@ -201,6 +204,14 @@ In version 1.105.1, `/metrics` requires the master key unless
 `require_auth_for_metrics_endpoint` is `false`. That's acceptable here because
 the gateway only listens on this machine.
 
+### 7. Tests
+
+[`tests/test_pii_guardrail.py`](../tests/test_pii_guardrail.py) has 20 unit
+tests, run inside the LiteLLM container. They cover what each regex should and
+shouldn't match, masking, PII split across message parts, both guardrails'
+allow, mask and block decisions, and a regression test that 256 KB inputs like
+`a.a.a...` are scanned in under half a second.
+
 ## Design decisions
 
 | Decision | Why |
@@ -213,9 +224,14 @@ the gateway only listens on this machine.
 
 ## Limitations
 
+- Only email addresses and US Social Security numbers are detected. Names,
+  phone numbers, card numbers and other PII aren't. The `presidio-service`
+  branch replaces the regexes with Microsoft Presidio, which recognises many
+  more types.
 - Regex catches PII in standard formats and accidental disclosure. It won't
   stop someone deliberately avoiding it (`jane at example dot com`,
   `123 45 6789`).
-- Only message text and reasoning are scanned, not tool-call arguments.
+- Only message text and reasoning are scanned, not tool-call arguments, images
+  or files.
 - The model sees placeholders such as `<EMAIL>`, so it can't use the masked
   details, for example to write a reply addressed to that email.
