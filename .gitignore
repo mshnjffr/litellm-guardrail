@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .claude/
+
+# Slide decks and their PDFs live next to the repo, not in it
+*.pptx
+*.pdf
