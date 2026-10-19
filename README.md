@@ -10,29 +10,6 @@ entirely on your machine: LiteLLM and Postgres in Docker, and the
 How it's built and integrated, with architecture diagrams:
 [docs/implementation.md](docs/implementation.md).
 
-## Version 2: Presidio PII service on Kubernetes
-
-The [`presidio-service`](https://github.com/mshnjffr/litellm-guardrail/tree/presidio-service)
-branch builds on this version:
-
-- **Microsoft Presidio** replaces the regexes, so the guardrail recognises every
-  PII type Presidio supports (names, phone numbers, card numbers, addresses and
-  more), not only emails and SSNs.
-- **A separate Python service** makes the PII decision (allow, mask or block),
-  and the LiteLLM guardrail calls it over HTTP.
-- **Docker and Helm:** the service is packaged as a Docker image and deployed
-  alongside LiteLLM in Kubernetes with one Helm chart.
-- **Prometheus metrics** from the service and from LiteLLM, with a Prometheus
-  instance that scrapes both.
-
-To use it:
-
-```sh
-git checkout presidio-service
-```
-
-It has its own README with setup instructions for Docker Desktop's Kubernetes.
-
 | File | Purpose |
 | --- | --- |
 | `pii_guardrail.py` | The PII detector and the two guardrails |
@@ -198,3 +175,26 @@ Regex detection catches PII in standard formats, which suits accidental
 disclosure. It won't stop someone deliberately evading it (`jane at example dot
 com`). Tool-call arguments aren't scanned. See
 [docs/implementation.md](docs/implementation.md#limitations).
+
+## Version 2: Presidio PII service on Kubernetes
+
+The [`presidio-service`](https://github.com/mshnjffr/litellm-guardrail/tree/presidio-service)
+branch builds on this version:
+
+- **Microsoft Presidio** replaces the regexes, so the guardrail recognises every
+  PII type Presidio supports (names, phone numbers, card numbers, addresses and
+  more), not only emails and SSNs.
+- **A separate Python service** makes the PII decision (allow, mask or block),
+  and the LiteLLM guardrail calls it over HTTP.
+- **Docker and Helm:** the service is packaged as a Docker image and deployed
+  alongside LiteLLM in Kubernetes with one Helm chart.
+- **Prometheus metrics** from the service and from LiteLLM, with a Prometheus
+  instance that scrapes both.
+
+To use it:
+
+```sh
+git checkout presidio-service
+```
+
+It has its own README with setup instructions for Docker Desktop's Kubernetes.
