@@ -7,19 +7,29 @@ model_list:
     litellm_params:
       model: ollama/deepseek-r1:8b
       api_base: http://host.docker.internal:11434  # Ollama on the host machine
-      # Moves streamed reasoning into the response content, where pii-guardrail
-      # scans it. Without this, streamed reasoning is not checked.
+      # Moves streamed reasoning into the response content, where
+      # pii-response-guardrail scans it. Without this, streamed reasoning is not checked.
       merge_reasoning_content_in_choices: true
 
+# PIIGuardrail is registered twice, once per hook, rather than once with
+# mode [pre_call, post_call]. LiteLLM logs a guardrail's configured mode, so with
+# both modes every run is shown as both pre-call and post-call in the UI's logs,
+# and its compliance checks find no pre-call screening.
 guardrails:
-  - guardrail_name: pii-guardrail
+  - guardrail_name: pii-prompt-guardrail
     litellm_params:
       guardrail: pii_guardrail.PIIGuardrail
-      mode: [pre_call, post_call]  # scan the prompt and the model response
-      default_on: true             # apply to every request
+      mode: pre_call     # mask PII in the prompt
+      default_on: true   # apply to every request
+
+  - guardrail_name: pii-response-guardrail
+    litellm_params:
+      guardrail: pii_guardrail.PIIGuardrail
+      mode: post_call    # block PII in the model response
+      default_on: true
 
   # Reasoning models return their reasoning separately from the response
-  # content, and LiteLLM doesn't pass it to pii-guardrail.
+  # content, and LiteLLM doesn't pass it to pii-response-guardrail.
   - guardrail_name: pii-reasoning-guardrail
     litellm_params:
       guardrail: pii_guardrail.PIIReasoningGuardrail
@@ -27,7 +37,7 @@ guardrails:
       default_on: true
 
 litellm_settings:
-  # Prometheus metrics at /metrics/, including litellm_guardrail_* for both guardrails.
+  # Prometheus metrics at /metrics/, including litellm_guardrail_* for each guardrail.
   callbacks: ["prometheus"]
   # Lets Prometheus scrape without the master key. The gateway listens on this
   # machine only; keep authentication on if it's ever exposed further.

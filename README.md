@@ -69,14 +69,15 @@ few minutes. Wait until it's ready:
 until curl -fs localhost:4000/health/readiness >/dev/null; do sleep 5; done; echo ready
 ```
 
-**5. Check both guardrails are loaded:**
+**5. Check the guardrails are loaded:**
 
 ```sh
 set -a; . ./.env; set +a   # loads LITELLM_MASTER_KEY into this shell
 curl -s localhost:4000/guardrails/list -H "Authorization: Bearer $LITELLM_MASTER_KEY"
 ```
 
-The response should list `pii-guardrail` and `pii-reasoning-guardrail`.
+The response should list `pii-prompt-guardrail`, `pii-response-guardrail` and
+`pii-reasoning-guardrail`.
 
 ## Try it
 
@@ -114,7 +115,7 @@ To test the masking without calling the model:
 
 ```sh
 curl -s localhost:4000/guardrails/apply_guardrail -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
-  -H 'Content-Type: application/json' -d '{"guardrail_name": "pii-guardrail", "text": "my SSN is 123-45-6789"}'
+  -H 'Content-Type: application/json' -d '{"guardrail_name": "pii-prompt-guardrail", "text": "my SSN is 123-45-6789"}'
 # {"response_text": "my SSN is <US_SSN>"}
 ```
 

@@ -17,9 +17,9 @@ flowchart LR
         subgraph compose["Docker Compose"]
             subgraph proxy["LiteLLM proxy, localhost:4000<br/>loads config.yaml + pii_guardrail.py from this repo"]
                 direction LR
-                pre["pii-guardrail<br/>pre_call: masks PII in the prompt"]
+                pre["pii-prompt-guardrail<br/>pre_call: masks PII in the prompt"]
                 router["Router<br/>deepseek-r1:8b"]
-                post["pii-guardrail + pii-reasoning-guardrail<br/>post_call: scan the response and reasoning"]
+                post["pii-response-guardrail + pii-reasoning-guardrail<br/>post_call: scan the response and reasoning"]
                 pre -- masked prompt --> router
                 router --> post
             end
@@ -158,10 +158,15 @@ reasoning inside `<think>` tags in the content.
 
 ```yaml
 guardrails:
-  - guardrail_name: pii-guardrail
+  - guardrail_name: pii-prompt-guardrail
     litellm_params:
       guardrail: pii_guardrail.PIIGuardrail   # <file>.<Class>
-      mode: [pre_call, post_call]
+      mode: pre_call
+      default_on: true
+  - guardrail_name: pii-response-guardrail
+    litellm_params:
+      guardrail: pii_guardrail.PIIGuardrail
+      mode: post_call
       default_on: true
   - guardrail_name: pii-reasoning-guardrail
     litellm_params:
@@ -173,6 +178,12 @@ guardrails:
 LiteLLM loads the `.py` file from the directory `config.yaml` is in.
 `default_on: true` runs the guardrails on every request, so clients can't skip
 them.
+
+`PIIGuardrail` is registered twice, once per hook. Registered once with
+`mode: [pre_call, post_call]`, it works the same, but LiteLLM logs the
+configured modes rather than the hook that ran: the UI's logs show every run as
+both pre-call and post-call, and its EU AI Act and GDPR checks find no pre-call
+screening.
 
 ### 5. Mount the code and start the proxy
 
