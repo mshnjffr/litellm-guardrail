@@ -84,13 +84,14 @@ deploy, `svc/litellm` can pick the database migration job's pod and fail with
 export LITELLM_MASTER_KEY=$(kubectl -n litellm get secret litellm-masterkey -o jsonpath='{.data.masterkey}' | base64 -d)
 ```
 
-**7. Check both guardrails are loaded:**
+**7. Check the guardrails are loaded:**
 
 ```sh
 curl -s localhost:4000/guardrails/list -H "Authorization: Bearer $LITELLM_MASTER_KEY"
 ```
 
-The response should list `pii-guardrail` and `pii-reasoning-guardrail`.
+The response should list `pii-prompt-guardrail`, `pii-response-guardrail` and
+`pii-reasoning-guardrail`.
 
 ## Try it
 

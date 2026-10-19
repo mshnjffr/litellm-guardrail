@@ -31,7 +31,7 @@ flowchart TB
             subgraph proxy["LiteLLM pod (official LiteLLM chart)"]
                 direction LR
                 router["LiteLLM proxy<br/>model: deepseek-r1:8b"]
-                guardrail["pii-guardrail + pii-reasoning-guardrail<br/>pii_guardrail.py, from a ConfigMap"]
+                guardrail["pii-prompt-guardrail, pii-response-guardrail,<br/>pii-reasoning-guardrail<br/>pii_guardrail.py, from a ConfigMap"]
                 router --- guardrail
             end
             pii["PII service pod<br/>FastAPI + Presidio + spaCy<br/>/v1/analyze, /metrics"]
@@ -68,7 +68,7 @@ sequenceDiagram
     L->>P: POST /v1/analyze (content, source=response)
     L->>P: POST /v1/analyze (reasoning, source=reasoning)
     alt PII in the response or reasoning
-        L-->>C: 400 "PII detected in model response: PERSON"
+        L-->>C: 400 "PII detected in model response: EMAIL_ADDRESS"
     else clean
         L-->>C: 200 with the model's answer
     end
@@ -199,7 +199,7 @@ need, at build time, so the service makes no network calls at runtime. The
 | `PIIDecision` | The service's answer: `action` (`allow`, `mask` or `block`), the PII types found, and the masked texts when masking. |
 | `PIIServiceClient` | Calls `POST /v1/analyze` with LiteLLM's shared HTTP client and returns the service's decision. Raises if the service is unreachable or errors, so the call fails closed. |
 | `PIIServiceGuardrail` | Base class: creates the client from the guardrail's `api_base` and `timeout`, and enforces the decision: returns the masked texts, or raises the 400 to block. |
-| `PIIGuardrail` | Implements `apply_guardrail`, the single method the docs recommend. LiteLLM calls it with the prompt (`pre_call`) and the response (`post_call`), for every endpoint and provider. |
+| `PIIGuardrail` | Implements `apply_guardrail`, the single method the docs recommend. LiteLLM calls it with the prompt (`pre_call`) and the response (`post_call`), for every endpoint and provider. It's registered twice, as `pii-prompt-guardrail` and `pii-response-guardrail`, one per hook. |
 | `PIIReasoningGuardrail` | Checks `reasoning_content` on non-streamed responses. LiteLLM doesn't include reasoning in `apply_guardrail`'s input, and when a guardrail implements `apply_guardrail` LiteLLM never calls its other hooks, so reasoning needs a separate guardrail that uses the `post_call` hook. |
 
 ```python
@@ -227,16 +227,23 @@ content, where `PIIGuardrail` checks it. Clients then see the reasoning inside
 
 - **The official LiteLLM chart** (`litellm-helm` 1.105.1) as a dependency, which
   also deploys Postgres. Its values, in [`values.yaml`](../charts/litellm-guardrail/values.yaml)
-  under `litellm:`, define the model and register both guardrails:
+  under `litellm:`, define the model and register the guardrails:
 
   ```yaml
   guardrails:
-    - guardrail_name: pii-guardrail
+    - guardrail_name: pii-prompt-guardrail
       litellm_params:
         guardrail: pii_guardrail.PIIGuardrail   # <file>.<Class>
-        mode: [pre_call, post_call]
+        mode: pre_call
         default_on: true
         api_base: http://pii-service:8000
+    - guardrail_name: pii-response-guardrail
+      litellm_params:
+        guardrail: pii_guardrail.PIIGuardrail
+        mode: post_call
+        default_on: true
+        api_base: http://pii-service:8000
+    # ...and pii-reasoning-guardrail (PIIReasoningGuardrail, post_call)
   ```
 
 - **A ConfigMap with the guardrail code**, mounted into the LiteLLM pod at
@@ -260,6 +267,7 @@ it into the cluster, and installs or upgrades the release.
 | Fail closed | If the PII service is down, unchecked text could contain PII, so the call fails. |
 | Raise `HTTPException(400)` to block | LiteLLM logs it as `guardrail_intervened`, a policy block. A plain `Exception` would return a 500 and be logged as `guardrail_failed_to_respond`. |
 | `default_on: true` | Runs on every request, so clients can't skip it. |
+| Register `PIIGuardrail` once per hook | With `mode: [pre_call, post_call]`, LiteLLM logs the configured modes rather than the hook that ran. The UI's logs then show every run as both pre-call and post-call, and its EU AI Act and GDPR checks find no pre-call screening. One registration per hook logs each run correctly. |
 | Mask prompts, block responses | Masking prompts keeps chats usable (see Request flow). Responses are blocked rather than masked because masking a streamed response only works on `/v1/chat/completions`: on other routes LiteLLM drops a guardrail's rewrite and would send the original text. |
 | Every Presidio entity type counts in prompts, except `DATE_TIME` | This gives LiteLLM Presidio's full coverage for what users send. `DATE_TIME` is ignored because dates aren't PII on their own and appear in almost every response. |
 | Names, places and nationalities don't block responses | Masking them in prompts costs little: the model still answers. Blocking them in responses blocked most ordinary answers, which usually name public people and places. Identifiers (emails, phone numbers, card numbers…) still block. Both lists are Helm values, so this changes without code changes. |
