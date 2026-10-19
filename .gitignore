@@ -5,3 +5,7 @@ __pycache__/
 .claude/
 # Downloaded by `helm dependency build`
 charts/litellm-guardrail/charts/
+
+# Slide decks and their PDFs live next to the repo, not in it
+*.pptx
+*.pdf
