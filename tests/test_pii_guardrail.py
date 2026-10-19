@@ -61,9 +61,11 @@ class PIIRegexTest(unittest.TestCase):
         size = 256 * 1024
         for text in ("a." * (size // 2), "a@" + "a." * (size // 2), "_." * (size // 2)):
             with self.subTest(text=text[:10] + "..."):
-                start = time.perf_counter()
+                # CPU time of this thread only: LiteLLM's background threads can
+                # stall it, which would make a wall-clock limit flaky.
+                start = time.thread_time()
                 self.detector.detect(text)
-                self.assertLess(time.perf_counter() - start, 0.5)
+                self.assertLess(time.thread_time() - start, 0.5)
 
 
 class PIIDetectAllTest(unittest.TestCase):
