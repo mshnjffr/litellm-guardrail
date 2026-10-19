@@ -192,10 +192,11 @@ need, at build time, so the service makes no network calls at runtime. The
 
 ## The LiteLLM guardrail
 
-[`guardrail/pii_guardrail.py`](../guardrail/pii_guardrail.py) has four small classes:
+[`guardrail/pii_guardrail.py`](../guardrail/pii_guardrail.py) has five small classes:
 
 | Class | Role |
 | --- | --- |
+| `PIIDecision` | The service's answer: `action` (`allow`, `mask` or `block`), the PII types found, and the masked texts when masking. |
 | `PIIServiceClient` | Calls `POST /v1/analyze` with LiteLLM's shared HTTP client and returns the service's decision. Raises if the service is unreachable or errors, so the call fails closed. |
 | `PIIServiceGuardrail` | Base class: creates the client from the guardrail's `api_base` and `timeout`, and enforces the decision: returns the masked texts, or raises the 400 to block. |
 | `PIIGuardrail` | Implements `apply_guardrail`, the single method the docs recommend. LiteLLM calls it with the prompt (`pre_call`) and the response (`post_call`), for every endpoint and provider. |
