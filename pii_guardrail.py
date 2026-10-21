@@ -1,7 +1,7 @@
 """
 LiteLLM custom guardrails for PII (email addresses and US Social Security
-numbers): PII in a prompt is masked before it reaches the model, and a model
-response containing PII is blocked.
+numbers): a prompt containing PII is blocked, or masked before it reaches the
+model, and a model response containing PII is blocked.
 """
 
 import re
@@ -14,6 +14,8 @@ from litellm.types.utils import Choices, GenericGuardrailAPIInputs
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+
+PromptAction = Literal["block", "mask"]
 
 
 class PIIDetector:
@@ -56,12 +58,13 @@ def pii_blocked_error(found: list[str], location: str) -> HTTPException:
 
 class PIIGuardrail(CustomGuardrail):
     """
-    Masks PII in the prompt (pre_call), and blocks the call if the model
-    response (post_call) contains PII.
+    Checks the prompt (pre_call) and the model response (post_call). A prompt
+    containing PII is blocked, or masked if `prompt_action` is "mask"; a
+    response containing PII is blocked.
 
-    Masking rather than blocking prompts matters for chat: clients resend the
-    whole conversation each turn, so a blocked message would block every later
-    turn too. A masked message is masked again each time, so the chat carries on.
+    Masking suits chat clients, which resend the whole conversation each turn: a
+    blocked message blocks every later turn too, while a masked message is
+    masked again each time, so the chat carries on.
     """
 
     detector = PIIDetector()
@@ -69,6 +72,13 @@ class PIIGuardrail(CustomGuardrail):
     # Makes LiteLLM hold a streamed response until it has been fully scanned,
     # so PII is never sent to the client before the block.
     streaming_buffer_until_moderated = True
+
+    def __init__(self, prompt_action: PromptAction = "block", **kwargs) -> None:
+        """`prompt_action` comes from the guardrail's litellm_params in config.yaml."""
+        if prompt_action not in ("block", "mask"):
+            raise ValueError(f"prompt_action must be 'block' or 'mask', not {prompt_action!r}")
+        super().__init__(**kwargs)
+        self.prompt_action = prompt_action
 
     async def apply_guardrail(
         self,
@@ -80,10 +90,10 @@ class PIIGuardrail(CustomGuardrail):
         texts = inputs.get("texts") or []
         if not texts:
             return inputs
-        if input_type == "request":
+        if input_type == "request" and self.prompt_action == "mask":
             inputs["texts"] = self._mask_prompt(texts)
         elif found := self.detector.detect_all(texts):
-            raise pii_blocked_error(found, "model response")
+            raise pii_blocked_error(found, "prompt" if input_type == "request" else "model response")
         return inputs
 
     def _mask_prompt(self, texts: list[str]) -> list[str]:

@@ -1,9 +1,10 @@
 # LiteLLM PII guardrail
 
 A [custom LiteLLM guardrail](https://docs.litellm.ai/docs/proxy/guardrails/custom_guardrail)
-for email addresses and US Social Security numbers. PII in a prompt is masked
-before it reaches the model (`jane@example.com` becomes `<EMAIL>`), and a model
-response containing PII, streamed or not, including reasoning output, is blocked. It runs
+for email addresses and US Social Security numbers. A prompt containing PII is
+blocked before it reaches the model, or masked if you prefer (`jane@example.com`
+becomes `<EMAIL>`), and a model response containing PII, streamed or not,
+including reasoning output, is blocked. It runs
 entirely on your machine: LiteLLM and Postgres in Docker, and the
 `deepseek-r1:8b` model in Ollama.
 
@@ -91,15 +92,18 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
   -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "What is the capital of France? One word."}]}'
 ```
 
-PII in the prompt is masked before it reaches the model, so the model only sees
-`<EMAIL>`. Ask it to repeat the prompt:
+A prompt containing PII is blocked before it reaches the model (HTTP 400):
 
 ```sh
-curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+curl -s -w '\nHTTP %{http_code}\n' localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Repeat exactly the text between the quotes, and nothing else: \"my email is jane.doe@example.com\""}]}'
-# ... "content": "... my email is <EMAIL>" ...
+  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "My email is jane.doe@example.com. Write me a short bio."}]}'
+# {"error": {"message": "PII detected in prompt: email", ...}}
+# HTTP 400
 ```
+
+To mask prompts instead, see
+[Masking prompts instead of blocking them](#masking-prompts-instead-of-blocking-them).
 
 PII in the model's response is blocked too. Here the model writes the SSN,
 and the client gets only the error, streamed or not:
@@ -111,12 +115,12 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
 # data: {"error": {"message": "PII detected in model response: us_ssn", ...}}
 ```
 
-To test the masking without calling the model:
+To test the prompt guardrail without calling the model:
 
 ```sh
 curl -s localhost:4000/guardrails/apply_guardrail -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' -d '{"guardrail_name": "pii-prompt-guardrail", "text": "my SSN is 123-45-6789"}'
-# {"response_text": "my SSN is <US_SSN>"}
+# {"error": {"message": "PII detected in prompt: us_ssn", ...}}
 ```
 
 Every response carries an `x-litellm-applied-guardrails` header. Blocked
@@ -158,6 +162,28 @@ The repo is mounted into the container, so after editing `pii_guardrail.py` or
 docker compose restart litellm
 ```
 
+## Masking prompts instead of blocking them
+
+By default, a prompt containing PII is blocked. To mask the PII instead and send
+the rest of the prompt to the model, set `prompt_action: mask` on
+`pii-prompt-guardrail` in `config.yaml`, then run `docker compose restart litellm`.
+
+Masking suits chat clients: they resend the whole conversation every turn, so
+with blocking, one message containing PII blocks every later turn until you
+start a new chat. With masking, the model only sees `<EMAIL>`. Ask it to repeat
+the prompt:
+
+```sh
+curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Repeat exactly the text between the quotes, and nothing else: \"my email is jane.doe@example.com\""}]}'
+# ... "content": "... my email is <EMAIL>" ...
+```
+
+The guardrail test above then returns `{"response_text": "my SSN is <US_SSN>"}`.
+PII split across message parts (`"jane@"` + `"example.com"`) can't be masked in
+place, so that prompt is still blocked. Responses are blocked either way.
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -174,7 +200,9 @@ To stop the gateway: `docker compose down`. To also delete the database:
 
 Regex detection catches PII in standard formats, which suits accidental
 disclosure. It won't stop someone deliberately evading it (`jane at example dot
-com`). Tool-call arguments aren't scanned. See
+com`). Tool-call arguments aren't scanned. With blocking (the default), one chat
+message containing PII blocks every later turn of that chat; masking avoids
+this. See
 [docs/implementation.md](docs/implementation.md#limitations).
 
 ## Version 2: Presidio PII service on Kubernetes

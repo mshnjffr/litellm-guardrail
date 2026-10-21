@@ -17,10 +17,10 @@ flowchart LR
         subgraph compose["Docker Compose"]
             subgraph proxy["LiteLLM proxy, localhost:4000<br/>loads config.yaml + pii_guardrail.py from this repo"]
                 direction LR
-                pre["pii-prompt-guardrail<br/>pre_call: masks PII in the prompt"]
+                pre["pii-prompt-guardrail<br/>pre_call: blocks or masks PII in the prompt"]
                 router["Router<br/>deepseek-r1:8b"]
                 post["pii-response-guardrail + pii-reasoning-guardrail<br/>post_call: scan the response and reasoning"]
-                pre -- masked prompt --> router
+                pre -- "prompt, if allowed" --> router
                 router --> post
             end
             db[("Postgres<br/>keys, spend and guardrail logs")]
@@ -47,8 +47,16 @@ sequenceDiagram
 
     C->>L: POST /v1/chat/completions
     L->>G: apply_guardrail(texts, input_type="request")
-    G-->>L: texts with PII masked ("jane@example.com" -> "<EMAIL>")
-    L->>O: chat request with the masked prompt
+    alt PII, prompt_action: block (the default)
+        G-->>L: raises HTTPException(400)
+        L-->>C: 400 "PII detected in prompt: email"
+    else PII, prompt_action: mask
+        G-->>L: texts with PII masked ("jane@example.com" -> "<EMAIL>")
+        L->>O: chat request with the masked prompt
+    else no PII
+        G-->>L: texts unchanged
+        L->>O: chat request
+    end
     O-->>L: content + reasoning_content
     L->>G: apply_guardrail(texts, input_type="response")
     L->>R: async_post_call_success_hook(response)
@@ -59,15 +67,16 @@ sequenceDiagram
     end
 ```
 
-Prompts are masked rather than blocked because chat clients resend the whole
-conversation every turn. A blocked message would stay in the history and block
-every later turn, until the user cleared the chat. A masked message is masked
-again each turn, so the conversation carries on and the model never sees the PII.
+A prompt containing PII is blocked by default, so it never reaches the model.
+With `prompt_action: mask`, it's masked instead: the model gets the prompt with
+each piece of PII replaced by its type. Masking suits chat clients, which resend
+the whole conversation every turn. A blocked message stays in the history and
+blocks every later turn, until the user clears the chat; a masked message is
+masked again each turn, so the conversation carries on.
 
-Responses are still blocked. With the prompt masked, the model rarely has PII to
-repeat, but it can still produce some, from its training data for example. And a
-blocked response doesn't get stuck: the client keeps only the error, which
-contains no PII.
+Responses are always blocked. The model can still produce PII, from its training
+data for example. A blocked response doesn't get stuck: the client keeps only
+the error, which contains no PII.
 
 For streamed responses, LiteLLM holds the chunks until the whole response has
 been scanned (`streaming_buffer_until_moderated`), so a blocked response sends
@@ -116,22 +125,28 @@ class PIIGuardrail(CustomGuardrail):
     detector = PIIDetector()
     streaming_buffer_until_moderated = True
 
+    def __init__(self, prompt_action: PromptAction = "block", **kwargs): ...
+
     async def apply_guardrail(self, inputs, request_data, input_type, logging_obj=None):
         texts = inputs.get("texts") or []
         if not texts:
             return inputs
-        if input_type == "request":
+        if input_type == "request" and self.prompt_action == "mask":
             inputs["texts"] = self._mask_prompt(texts)
         elif found := self.detector.detect_all(texts):
-            raise pii_blocked_error(found, "model response")
+            raise pii_blocked_error(found, "prompt" if input_type == "request" else "model response")
         return inputs
 ```
 
-Returning `inputs` with edited `texts` masks the call: LiteLLM writes the texts
-back into the request before sending it to the model, on every endpoint
-(chat completions, `/v1/messages`, the Responses API). Raising blocks the call.
-PII split across message parts can't be masked in place, so that prompt is
-blocked instead.
+Raising blocks the call. Returning `inputs` with edited `texts` masks it:
+LiteLLM writes the texts back into the request before sending it to the model,
+on every endpoint (chat completions, `/v1/messages`, the Responses API). With
+masking, PII split across message parts can't be masked in place, so that
+prompt is blocked instead.
+
+`prompt_action` is set in `config.yaml`: LiteLLM passes any extra field in a
+guardrail's `litellm_params` to the class's constructor. An invalid value stops
+LiteLLM at startup rather than quietly picking one behaviour.
 
 ### 3. A second class for reasoning output
 
@@ -163,6 +178,7 @@ guardrails:
       guardrail: pii_guardrail.PIIGuardrail   # <file>.<Class>
       mode: pre_call
       default_on: true
+      prompt_action: block                    # or mask
   - guardrail_name: pii-response-guardrail
     litellm_params:
       guardrail: pii_guardrail.PIIGuardrail
@@ -208,8 +224,8 @@ litellm_settings:
 `litellm_guardrail_errors_total` are labelled by guardrail name and hook
 (`pre_call`, `post_call`). LiteLLM counts a block as `status="error"`, with
 `error_type="HTTPException"`. A real failure has a different error type, which is
-how the two can be told apart. Masked prompts count as `success`, since masking
-isn't a failure.
+how the two can be told apart. With `prompt_action: mask`, masked prompts count
+as `success`, since masking isn't a failure.
 
 In version 1.105.1, `/metrics` requires the master key unless
 `require_auth_for_metrics_endpoint` is `false`. That's acceptable here because
@@ -217,10 +233,10 @@ the gateway only listens on this machine.
 
 ### 7. Tests
 
-[`tests/test_pii_guardrail.py`](../tests/test_pii_guardrail.py) has 20 unit
+[`tests/test_pii_guardrail.py`](../tests/test_pii_guardrail.py) has 24 unit
 tests, run inside the LiteLLM container. They cover what each regex should and
 shouldn't match, masking, PII split across message parts, both guardrails'
-allow, mask and block decisions, and a regression test that 256 KB inputs like
+allow, mask and block decisions with either `prompt_action`, and a regression test that 256 KB inputs like
 `a.a.a...` are scanned in under half a second.
 
 ## Design decisions
@@ -228,7 +244,8 @@ allow, mask and block decisions, and a regression test that 256 KB inputs like
 | Decision | Why |
 | --- | --- |
 | Raise `HTTPException(400)`, not `Exception` | The docs' plain `Exception` returns a 500 and is logged as `guardrail_failed_to_respond`, as if the guardrail had broken. A 400 is logged as `guardrail_intervened`: a policy block. |
-| Mask prompts, block responses | Masking prompts keeps chats usable (see Request flow). Responses are blocked rather than masked because masking a streamed response only works on `/v1/chat/completions`: on other routes LiteLLM drops a guardrail's rewrite and would send the original text. |
+| Block prompts by default, with an option to mask them | Blocking means PII never reaches the model. Masking is the option for chat clients (see Request flow). |
+| Always block responses | Responses are blocked rather than masked because masking a streamed response only works on `/v1/chat/completions`: on other routes LiteLLM drops a guardrail's rewrite and would send the original text. |
 | Name the PII types, never the values | Masked prompts, blocked responses and logs don't repeat the PII. |
 | `streaming_buffer_until_moderated = True` | Without it, `post_call` on a streamed response only runs after the content has reached the client. |
 | Pin `litellm:v1.105.1` | The guardrails depend on behaviour of this release: how the file is loaded, the streaming setting, and which hooks run. |
@@ -244,5 +261,7 @@ allow, mask and block decisions, and a regression test that 256 KB inputs like
   `123 45 6789`).
 - Only message text and reasoning are scanned, not tool-call arguments, images
   or files.
-- The model sees placeholders such as `<EMAIL>`, so it can't use the masked
-  details, for example to write a reply addressed to that email.
+- With blocking (the default), one chat message containing PII blocks every
+  later turn of that chat, because chat clients resend the whole conversation.
+- With masking, the model sees placeholders such as `<EMAIL>`, so it can't use
+  the masked details, for example to write a reply addressed to that email.

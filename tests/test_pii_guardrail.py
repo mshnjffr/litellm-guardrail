@@ -101,34 +101,64 @@ class PIIMaskTest(unittest.TestCase):
         self.assertEqual(self.detector.mask("What is 2 + 2?"), "What is 2 + 2?")
 
 
-class PIIGuardrailTest(unittest.IsolatedAsyncioTestCase):
+class PIIGuardrailCase(unittest.IsolatedAsyncioTestCase):
+    """Applies a PIIGuardrail created with `prompt_action`."""
+
+    prompt_action = "block"
+
     def setUp(self):
-        self.guardrail = PIIGuardrail(guardrail_name="pii-test", event_hook=["pre_call", "post_call"])
+        self.guardrail = PIIGuardrail(
+            guardrail_name="pii-test", event_hook=["pre_call", "post_call"], prompt_action=self.prompt_action
+        )
 
     async def apply(self, texts, input_type="request"):
         return await self.guardrail.apply_guardrail(inputs={"texts": texts}, request_data={}, input_type=input_type)
 
-    async def test_masks_pii_in_the_prompt(self):
-        inputs = await self.apply(["how are you? testuser@gmail.com", "hi"])
-        self.assertEqual(inputs["texts"], ["how are you? <EMAIL>", "hi"])
+    async def assert_blocked(self, texts, detail, input_type="request"):
+        with self.assertRaises(HTTPException) as ctx:
+            await self.apply(texts, input_type)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.detail, detail)
+
+
+class PIIGuardrailTest(PIIGuardrailCase):
+    """The default prompt_action: prompts containing PII are blocked."""
+
+    async def test_blocks_pii_in_the_prompt(self):
+        await self.assert_blocked(["how are you? testuser@gmail.com", "hi"], "PII detected in prompt: email")
 
     async def test_passes_a_clean_prompt_unchanged(self):
         self.assertEqual(await self.apply(["What is 2 + 2?"]), {"texts": ["What is 2 + 2?"]})
 
     async def test_blocks_pii_split_across_prompt_parts(self):
-        with self.assertRaises(HTTPException) as ctx:
-            await self.apply(["my email is jane@", "example.com"])
-        self.assertEqual(ctx.exception.detail, "PII detected in prompt: email")
+        await self.assert_blocked(["my email is jane@", "example.com"], "PII detected in prompt: email")
 
     async def test_blocks_pii_in_the_response(self):
-        with self.assertRaises(HTTPException) as ctx:
-            await self.apply(["Sure: 219-09-9999"], input_type="response")
-        self.assertEqual(ctx.exception.status_code, 400)
-        self.assertEqual(ctx.exception.detail, "PII detected in model response: us_ssn")
+        await self.assert_blocked(["Sure: 219-09-9999"], "PII detected in model response: us_ssn", input_type="response")
 
     async def test_passes_inputs_without_text(self):
         inputs = await self.guardrail.apply_guardrail(inputs={}, request_data={}, input_type="request")
         self.assertEqual(inputs, {})
+
+    def test_rejects_unknown_prompt_action(self):
+        with self.assertRaises(ValueError):
+            PIIGuardrail(guardrail_name="pii-test", event_hook="pre_call", prompt_action="allow")
+
+
+class PIIGuardrailMaskingTest(PIIGuardrailCase):
+    """With prompt_action "mask", PII in prompts is masked instead of blocked."""
+
+    prompt_action = "mask"
+
+    async def test_masks_pii_in_the_prompt(self):
+        inputs = await self.apply(["how are you? testuser@gmail.com", "hi"])
+        self.assertEqual(inputs["texts"], ["how are you? <EMAIL>", "hi"])
+
+    async def test_still_blocks_pii_split_across_prompt_parts(self):
+        await self.assert_blocked(["my email is jane@", "example.com"], "PII detected in prompt: email")
+
+    async def test_still_blocks_pii_in_the_response(self):
+        await self.assert_blocked(["Sure: 219-09-9999"], "PII detected in model response: us_ssn", input_type="response")
 
 
 class PIIReasoningGuardrailTest(unittest.IsolatedAsyncioTestCase):

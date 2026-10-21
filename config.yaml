@@ -19,8 +19,13 @@ guardrails:
   - guardrail_name: pii-prompt-guardrail
     litellm_params:
       guardrail: pii_guardrail.PIIGuardrail
-      mode: pre_call     # mask PII in the prompt
+      mode: pre_call     # check the prompt
       default_on: true   # apply to every request
+      # What to do with a prompt containing PII: block it (HTTP 400), or mask
+      # the PII and send the rest on (jane@example.com becomes <EMAIL>). Masking
+      # suits chat clients, which resend the whole conversation every turn: a
+      # blocked message blocks every later turn too, until the chat is cleared.
+      prompt_action: block
 
   - guardrail_name: pii-response-guardrail
     litellm_params:
