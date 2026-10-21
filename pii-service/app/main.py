@@ -4,6 +4,8 @@ model response or model reasoning, and it decides whether to allow it, mask the
 PII in it, or block it.
 
     POST /v1/analyze  {"texts": ["Email jane@example.com"], "source": "request"}
+                      -> {"action": "block", "entities": ["EMAIL_ADDRESS"], "texts": null}
+                      or, with PII_PROMPT_ACTION=mask:
                       -> {"action": "mask", "entities": ["EMAIL_ADDRESS"], "texts": ["Email <EMAIL_ADDRESS>"]}
     GET  /healthz     liveness and readiness
     GET  /metrics     Prometheus metrics
@@ -21,7 +23,7 @@ from app.metrics import ServiceMetrics
 
 class AnalyzeRequest(BaseModel):
     texts: list[str]
-    # What the texts are: the prompt (masked), or the model's response or reasoning (blocked).
+    # What the texts are: the prompt, or the model's response or reasoning.
     source: Source = "request"
 
 

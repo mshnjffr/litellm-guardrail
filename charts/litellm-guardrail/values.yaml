@@ -8,14 +8,20 @@ piiService:
     tag: 0.1.0
     pullPolicy: IfNotPresent  # built locally, see scripts/deploy.sh
   replicas: 1
+  # What to do with a prompt containing PII: block it (HTTP 400), or mask the
+  # PII and send the rest on (jane@example.com becomes <EMAIL_ADDRESS>). Masking
+  # suits chat clients, which resend the whole conversation every turn: a
+  # blocked message blocks every later turn too, until the chat is cleared.
+  # Responses containing PII are always blocked.
+  promptAction: block
   # Detection settings. Every Presidio entity type counts as PII, except those
-  # ignored: it's masked in prompts and blocks responses.
+  # ignored below.
   scoreThreshold: 0.4         # Presidio confidence needed to count as PII (0-1)
   # Entity types that are never masked or blocked. DATE_TIME isn't PII on its
   # own, and model reasoning almost always contains one ("today", "a moment"),
   # so it would block most responses.
   ignoredEntities: [DATE_TIME]
-  # Entity types that are masked in prompts but don't block responses. Names,
+  # Entity types that count in prompts but don't block responses. Names,
   # places and nationalities in an answer are almost always public knowledge
   # ("Lord Rayleigh", "Earth"), and blocking them blocks most ordinary answers.
   responseIgnoredEntities: [PERSON, LOCATION, NRP]

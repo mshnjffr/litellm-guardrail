@@ -2,10 +2,11 @@
 The PII decision, made with Presidio: allow the texts, mask the PII in them, or
 block them.
 
-Prompts are masked, because chat clients resend the whole conversation every
-turn: a blocked message would block every later turn, while a masked one lets
-the conversation carry on. Model responses and reasoning are blocked, because
-LiteLLM can't reliably apply a rewrite to a streamed response.
+A prompt containing PII is blocked, or masked if `prompt_action` is "mask".
+Masking suits chat clients, which resend the whole conversation every turn: a
+blocked message would block every later turn, while a masked one lets the
+conversation carry on. Model responses and reasoning are always blocked,
+because LiteLLM can't reliably apply a rewrite to a streamed response.
 """
 
 import os
@@ -18,25 +19,35 @@ from presidio_anonymizer import AnonymizerEngine
 
 Source = Literal["request", "response", "reasoning"]
 Action = Literal["allow", "mask", "block"]
+PromptAction = Literal["block", "mask"]
+PROMPT_ACTIONS: tuple[str, ...] = ("block", "mask")
 
 
 @dataclass(frozen=True)
 class Settings:
     """Detection settings, read from environment variables."""
 
+    # What to do with a prompt containing PII: "block" it, or "mask" the PII and
+    # send the rest on to the model.
+    prompt_action: PromptAction = "block"
     # Presidio scores phone numbers at 0.4, so a higher default would miss them.
     # Very weak pattern matches (0.01-0.05, e.g. any 9-digit number) stay below it.
     score_threshold: float = 0.4
     # Entity types that are never masked or blocked.
     ignored_entities: frozenset[str] = field(default_factory=frozenset)
-    # Entity types that are masked in prompts but don't block responses, such as
+    # Entity types that count in prompts but don't block responses, such as
     # PERSON: answers often name public figures ("Lord Rayleigh").
     response_ignored_entities: frozenset[str] = field(default_factory=frozenset)
     language: str = "en"
 
+    def __post_init__(self) -> None:
+        if self.prompt_action not in PROMPT_ACTIONS:
+            raise ValueError(f"prompt_action must be 'block' or 'mask', not {self.prompt_action!r}")
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
+            prompt_action=os.environ.get("PII_PROMPT_ACTION", cls.prompt_action).strip().lower(),
             score_threshold=float(os.environ.get("PII_SCORE_THRESHOLD", cls.score_threshold)),
             ignored_entities=_entity_list(os.environ.get("PII_IGNORED_ENTITIES", "")),
             response_ignored_entities=_entity_list(os.environ.get("PII_RESPONSE_IGNORED_ENTITIES", "")),
@@ -79,9 +90,9 @@ class PIIDetector:
         self.response_entities = sorted(set(self.entities) - settings.response_ignored_entities)
 
     def decide(self, texts: list[str], source: Source) -> Decision:
-        if source == "request":
+        if source == "request" and self.settings.prompt_action == "mask":
             return self._mask(texts)
-        entities = self.response_entities
+        entities = self.entities if source == "request" else self.response_entities
         found = {result.entity_type for text in texts for result in self._analyze(text, entities)}
         found |= self._split_pii(texts, entities)
         return Decision("block" if found else "allow", sorted(found))

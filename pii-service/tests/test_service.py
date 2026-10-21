@@ -16,21 +16,39 @@ from app.main import create_app
 
 analyzer: AnalyzerEngine
 
+# A prompt with PII, the entity type found, and the prompt once masked.
+PII_PROMPTS = (
+    ("Send the report to jane.doe@example.com", "EMAIL_ADDRESS", "Send the report to <EMAIL_ADDRESS>"),
+    ("My social security number is 219-09-9999", "US_SSN", "My social security number is <US_SSN>"),
+    ("My card is 4111 1111 1111 1111", "CREDIT_CARD", "My card is <CREDIT_CARD>"),
+    ("Call me on +44 20 7946 0958", "PHONE_NUMBER", "Call me on <PHONE_NUMBER>"),
+    ("my ip is 192.168.1.20", "IP_ADDRESS", "my ip is <IP_ADDRESS>"),
+    ("John Smith wrote this", "PERSON", "<PERSON> wrote this"),
+)
+
 
 def setUpModule():
     global analyzer
     analyzer = AnalyzerEngine(supported_languages=["en"])  # loading spaCy takes a few seconds, so share it
 
 
-class AnalyzeEndpointTest(unittest.TestCase):
+class ServiceTestCase(unittest.TestCase):
+    """Runs the service with `settings`, sharing the module's Presidio engine."""
+
+    settings = Settings()
+
     def setUp(self):
         # Entering the client runs the app's startup.
-        self.client = self.enterContext(TestClient(create_app(PIIDetector(Settings(), analyzer))))
+        self.client = self.enterContext(TestClient(create_app(PIIDetector(self.settings, analyzer))))
 
     def analyze(self, *texts, source="request"):
         response = self.client.post("/v1/analyze", json={"texts": list(texts), "source": source})
         self.assertEqual(response.status_code, 200)
         return response.json()
+
+
+class AnalyzeEndpointTest(ServiceTestCase):
+    """The default settings: prompts, responses and reasoning containing PII are blocked."""
 
     def test_allows_text_without_pii(self):
         for source in ("request", "response", "reasoning"):
@@ -40,24 +58,13 @@ class AnalyzeEndpointTest(unittest.TestCase):
                     {"action": "allow", "entities": [], "texts": None},
                 )
 
-    def test_masks_pii_in_prompts(self):
-        for text, entity, masked in (
-            ("Send the report to jane.doe@example.com", "EMAIL_ADDRESS", "Send the report to <EMAIL_ADDRESS>"),
-            ("My social security number is 219-09-9999", "US_SSN", "My social security number is <US_SSN>"),
-            ("My card is 4111 1111 1111 1111", "CREDIT_CARD", "My card is <CREDIT_CARD>"),
-            ("Call me on +44 20 7946 0958", "PHONE_NUMBER", "Call me on <PHONE_NUMBER>"),
-            ("my ip is 192.168.1.20", "IP_ADDRESS", "my ip is <IP_ADDRESS>"),
-            ("John Smith wrote this", "PERSON", "<PERSON> wrote this"),
-        ):
+    def test_blocks_pii_in_prompts(self):
+        for text, entity, _ in PII_PROMPTS:
             with self.subTest(entity=entity):
                 result = self.analyze(text)
-                self.assertEqual(result["action"], "mask")
+                self.assertEqual(result["action"], "block")
                 self.assertIn(entity, result["entities"])
-                self.assertEqual(result["texts"], [masked])
-
-    def test_masks_each_text_of_a_conversation(self):
-        result = self.analyze("how are you? testuser@gmail.com", "Error fetching response", "hi")
-        self.assertEqual(result["texts"], ["how are you? <EMAIL_ADDRESS>", "Error fetching response", "hi"])
+                self.assertIsNone(result["texts"])
 
     def test_blocks_pii_split_across_prompt_parts(self):
         for texts in (["Reply OK. My email is jane@", "example.com"], ["SSN 219-09-", "9999 please"]):
@@ -92,11 +99,41 @@ class AnalyzeEndpointTest(unittest.TestCase):
         self.analyze("Sure: jane.doe@example.com", source="response")
         self.analyze("What is 2 + 2?", source="reasoning")
         metrics = self.client.get("/metrics").text
-        self.assertIn('pii_service_requests_total{decision="mask",source="request"} 1.0', metrics)
+        self.assertIn('pii_service_requests_total{decision="block",source="request"} 1.0', metrics)
         self.assertIn('pii_service_requests_total{decision="block",source="response"} 1.0', metrics)
         self.assertIn('pii_service_requests_total{decision="allow",source="reasoning"} 1.0', metrics)
         self.assertIn('pii_service_entities_detected_total{entity_type="EMAIL_ADDRESS",source="request"} 1.0', metrics)
         self.assertIn('pii_service_analysis_duration_seconds_count{source="request"} 1.0', metrics)
+
+
+class PromptMaskingTest(ServiceTestCase):
+    """With prompt_action "mask", PII in prompts is masked instead of blocked."""
+
+    settings = Settings(prompt_action="mask")
+
+    def test_masks_pii_in_prompts(self):
+        for text, entity, masked in PII_PROMPTS:
+            with self.subTest(entity=entity):
+                result = self.analyze(text)
+                self.assertEqual(result["action"], "mask")
+                self.assertIn(entity, result["entities"])
+                self.assertEqual(result["texts"], [masked])
+
+    def test_masks_each_text_of_a_conversation(self):
+        result = self.analyze("how are you? testuser@gmail.com", "Error fetching response", "hi")
+        self.assertEqual(result["texts"], ["how are you? <EMAIL_ADDRESS>", "Error fetching response", "hi"])
+
+    def test_still_blocks_pii_split_across_prompt_parts(self):
+        result = self.analyze("Reply OK. My email is jane@", "example.com")
+        self.assertEqual(result["action"], "block")
+        self.assertIsNone(result["texts"])
+
+    def test_still_blocks_pii_in_responses(self):
+        self.assertEqual(self.analyze("Sure: jane.doe@example.com", source="response")["action"], "block")
+
+    def test_metrics_count_masked_prompts(self):
+        self.analyze("Send the report to jane.doe@example.com")
+        self.assertIn('pii_service_requests_total{decision="mask",source="request"} 1.0', self.client.get("/metrics").text)
 
 
 class SettingsTest(unittest.TestCase):
@@ -110,8 +147,13 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(PIIDetector(Settings(), analyzer).decide(text, "response").action, "block")
         self.assertEqual(PIIDetector(Settings(score_threshold=0.9), analyzer).decide(text, "response").action, "allow")
 
+    def test_rejects_unknown_prompt_action(self):
+        with self.assertRaises(ValueError):
+            Settings(prompt_action="allow")
+
     def test_reads_settings_from_environment(self):
         env = {
+            "PII_PROMPT_ACTION": " Mask ",
             "PII_SCORE_THRESHOLD": "0.7",
             "PII_IGNORED_ENTITIES": "location, date_time",
             "PII_RESPONSE_IGNORED_ENTITIES": "person,nrp",
@@ -122,6 +164,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(
             settings,
             Settings(
+                prompt_action="mask",
                 score_threshold=0.7,
                 ignored_entities=frozenset({"LOCATION", "DATE_TIME"}),
                 response_ignored_entities=frozenset({"PERSON", "NRP"}),
@@ -131,10 +174,12 @@ class SettingsTest(unittest.TestCase):
 
 
 class ResponseIgnoredEntitiesTest(unittest.TestCase):
-    """Names and places are masked in prompts, but don't block responses."""
+    """Names and places count in prompts, but don't block responses."""
+
+    ignored = frozenset({"PERSON", "LOCATION", "NRP"})
 
     def setUp(self):
-        self.detector = PIIDetector(Settings(response_ignored_entities=frozenset({"PERSON", "LOCATION", "NRP"})), analyzer)
+        self.detector = PIIDetector(Settings(response_ignored_entities=self.ignored), analyzer)
 
     def test_allows_public_names_and_places_in_responses(self):
         answer = ["The sky is blue because of Rayleigh scattering in the Earth's atmosphere, explained by Lord Rayleigh."]
@@ -148,10 +193,12 @@ class ResponseIgnoredEntitiesTest(unittest.TestCase):
         self.assertIn("EMAIL_ADDRESS", decision.entities)
         self.assertNotIn("PERSON", decision.entities)
 
-    def test_still_masks_names_and_places_in_prompts(self):
-        decision = self.detector.decide(["John Smith lives in London"], "request")
-        self.assertEqual(decision.action, "mask")
-        self.assertEqual(decision.texts, ["<PERSON> lives in <LOCATION>"])
+    def test_still_checks_names_and_places_in_prompts(self):
+        prompt = ["John Smith lives in London"]
+        decision = self.detector.decide(prompt, "request")
+        self.assertEqual((decision.action, decision.entities), ("block", ["LOCATION", "PERSON"]))
+        masking = PIIDetector(Settings(prompt_action="mask", response_ignored_entities=self.ignored), analyzer)
+        self.assertEqual(masking.decide(prompt, "request").texts, ["<PERSON> lives in <LOCATION>"])
 
 
 if __name__ == "__main__":

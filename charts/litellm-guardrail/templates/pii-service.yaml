@@ -31,6 +31,8 @@ spec:
             - name: http
               containerPort: 8000
           env:
+            - name: PII_PROMPT_ACTION
+              value: {{ .Values.piiService.promptAction | quote }}
             - name: PII_SCORE_THRESHOLD
               value: {{ .Values.piiService.scoreThreshold | quote }}
             - name: PII_IGNORED_ENTITIES

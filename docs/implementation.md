@@ -11,8 +11,8 @@ The work is split in two:
   so it recognises every PII type Presidio does, and it exposes Prometheus metrics.
 - **The LiteLLM guardrail** ([`guardrail/pii_guardrail.py`](../guardrail/pii_guardrail.py))
   sends the text of each prompt and model response to the service over HTTP, and
-  enforces its decision: PII in a prompt is masked before it reaches the model,
-  and a response containing PII is blocked.
+  enforces its decision: a prompt containing PII is blocked before it reaches
+  the model, or masked if configured, and a response containing PII is blocked.
 
 Both run in Kubernetes, deployed with one Helm chart
 ([`charts/litellm-guardrail/`](../charts/litellm-guardrail)).
@@ -62,8 +62,16 @@ sequenceDiagram
 
     C->>L: POST /v1/chat/completions
     L->>P: POST /v1/analyze (prompt, source=request)
-    P-->>L: mask, ["Send it to <EMAIL_ADDRESS>"]
-    L->>O: chat request with the masked prompt
+    alt PII, promptAction: block (the default)
+        P-->>L: block, ["EMAIL_ADDRESS"]
+        L-->>C: 400 "PII detected in prompt: EMAIL_ADDRESS"
+    else PII, promptAction: mask
+        P-->>L: mask, ["Send it to <EMAIL_ADDRESS>"]
+        L->>O: chat request with the masked prompt
+    else no PII
+        P-->>L: allow
+        L->>O: chat request
+    end
     O-->>L: content + reasoning
     L->>P: POST /v1/analyze (content, source=response)
     L->>P: POST /v1/analyze (reasoning, source=reasoning)
@@ -74,15 +82,16 @@ sequenceDiagram
     end
 ```
 
-Prompts are masked rather than blocked because chat clients resend the whole
-conversation every turn. A blocked message would stay in the history and block
-every later turn, until the user cleared the chat. A masked message is masked
-again each turn, so the conversation carries on and the model never sees the PII.
+A prompt containing PII is blocked by default, so it never reaches the model.
+With `piiService.promptAction: mask`, it's masked instead: the model gets the
+prompt with each piece of PII replaced by its type. Masking suits chat clients,
+which resend the whole conversation every turn. A blocked message stays in the
+history and blocks every later turn, until the user clears the chat; a masked
+message is masked again each turn, so the conversation carries on.
 
-Responses are still blocked. With the prompt masked, the model rarely has PII to
-repeat, but it can still produce some, from its training data for example. And a
-blocked response doesn't get stuck: the client keeps only the error, which
-contains no PII.
+Responses are always blocked. The model can still produce PII, from its training
+data for example. A blocked response doesn't get stuck: the client keeps only
+the error, which contains no PII.
 
 If the PII service can't be reached or returns an error, the call fails with a
 500 instead of letting unchecked text through.
@@ -101,6 +110,7 @@ the client only the error, never part of the PII.
 class PIIDetector:
     def __init__(self, settings: Settings, analyzer: AnalyzerEngine | None = None): ...
     def decide(self, texts: list[str], source: Source) -> Decision: ...
+    # Decision(action="block", entities=["EMAIL_ADDRESS"]), or with prompt_action "mask":
     # Decision(action="mask", entities=["EMAIL_ADDRESS"], texts=["Send it to <EMAIL_ADDRESS>"])
 ```
 
@@ -108,8 +118,9 @@ The decision depends on `source`:
 
 | `source` | PII found | Decision |
 | --- | --- | --- |
-| `request` (the prompt) | in a text | `mask`, with each piece of PII replaced by its type using Presidio's anonymizer |
-| `request` | split across texts (`"jane@"` + `"example.com"`) | `block`, because it can't be masked in place |
+| `request` (the prompt) | anywhere | `block`, the default (`PII_PROMPT_ACTION=block`) |
+| `request`, with `PII_PROMPT_ACTION=mask` | in a text | `mask`, with each piece of PII replaced by its type using Presidio's anonymizer |
+| `request`, with `PII_PROMPT_ACTION=mask` | split across texts (`"jane@"` + `"example.com"`) | `block`, because it can't be masked in place |
 | `response`, `reasoning` | anywhere, except types in `PII_RESPONSE_IGNORED_ENTITIES` | `block` |
 | any | none | `allow` |
 
@@ -121,7 +132,7 @@ The decision depends on `source`:
   isn't PII on its own, and model reasoning almost always contains one ("today",
   "a moment"), so it blocked most responses.
 - Responses are checked for fewer types: those in
-  `PII_RESPONSE_IGNORED_ENTITIES` are masked in prompts but don't block
+  `PII_RESPONSE_IGNORED_ENTITIES` count in prompts but don't block
   responses. The Helm chart sets `PERSON`, `LOCATION` and `NRP`, because
   ordinary answers name public people and places ("Rayleigh scattering,
   explained by Lord Rayleigh", "the Earth's atmosphere"), and blocking those
@@ -139,7 +150,7 @@ The decision depends on `source`:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /v1/analyze` | `{"texts": [...], "source": "request"}` returns `{"action": "mask", "entities": ["EMAIL_ADDRESS"], "texts": [...]}`. `source` is `request`, `response` or `reasoning`. `texts` is set only when `action` is `mask`. |
+| `POST /v1/analyze` | `{"texts": [...], "source": "request"}` returns `{"action": "block", "entities": ["EMAIL_ADDRESS"], "texts": null}`, or `"action": "mask"` with the masked `texts` when masking. `source` is `request`, `response` or `reasoning`. `texts` is set only when `action` is `mask`. |
 | `GET /healthz` | Liveness and readiness. The service only answers once the spaCy model has loaded. |
 | `GET /metrics` | Prometheus metrics. |
 
@@ -169,7 +180,7 @@ guardrail name and hook. Together:
 | --- | --- |
 | Are the guardrails running, and how much latency do they add? | `litellm_guardrail_requests_total`, `litellm_guardrail_latency_seconds` (gateway side, including the HTTP call) |
 | Is the PII service failing? | `litellm_guardrail_errors_total` with an `error_type` other than `HTTPException`, and `pii_service_errors_total` |
-| How many prompts are masked, and how many responses blocked? | `pii_service_requests_total` by `decision`. LiteLLM counts a block as an error and a mask as `success`, so it can't answer this. |
+| How many prompts and responses are blocked, and how many prompts masked? | `pii_service_requests_total` by `decision`. LiteLLM counts a block as an error and a mask as `success`, so it can't answer this. |
 | Which PII types turn up? | `pii_service_entities_detected_total` |
 
 In version 1.105.1, LiteLLM's `/metrics` requires the master key unless
@@ -251,8 +262,8 @@ content, where `PIIGuardrail` checks it. Clients then see the reasoning inside
   directory its `config.yaml` is in. The code is passed at install time with
   `--set-file guardrailCode=guardrail/pii_guardrail.py`.
 - **The PII service** Deployment and Service, with its detection settings as
-  values (`piiService.scoreThreshold`, `piiService.ignoredEntities`,
-  `piiService.responseIgnoredEntities`).
+  values (`piiService.promptAction`, `piiService.scoreThreshold`,
+  `piiService.ignoredEntities`, `piiService.responseIgnoredEntities`).
 - **Prometheus** (`prometheus.enabled`), with a scrape config for LiteLLM and the
   PII service.
 
@@ -268,19 +279,23 @@ it into the cluster, and installs or upgrades the release.
 | Raise `HTTPException(400)` to block | LiteLLM logs it as `guardrail_intervened`, a policy block. A plain `Exception` would return a 500 and be logged as `guardrail_failed_to_respond`. |
 | `default_on: true` | Runs on every request, so clients can't skip it. |
 | Register `PIIGuardrail` once per hook | With `mode: [pre_call, post_call]`, LiteLLM logs the configured modes rather than the hook that ran. The UI's logs then show every run as both pre-call and post-call, and its EU AI Act and GDPR checks find no pre-call screening. One registration per hook logs each run correctly. |
-| Mask prompts, block responses | Masking prompts keeps chats usable (see Request flow). Responses are blocked rather than masked because masking a streamed response only works on `/v1/chat/completions`: on other routes LiteLLM drops a guardrail's rewrite and would send the original text. |
+| Block prompts by default, with an option to mask them | Blocking means PII never reaches the model. Masking is the option for chat clients (see Request flow). The service owns this setting, like the rest of the decision, so the guardrail doesn't change. |
+| Always block responses | Responses are blocked rather than masked because masking a streamed response only works on `/v1/chat/completions`: on other routes LiteLLM drops a guardrail's rewrite and would send the original text. |
 | Every Presidio entity type counts in prompts, except `DATE_TIME` | This gives LiteLLM Presidio's full coverage for what users send. `DATE_TIME` is ignored because dates aren't PII on their own and appear in almost every response. |
-| Names, places and nationalities don't block responses | Masking them in prompts costs little: the model still answers. Blocking them in responses blocked most ordinary answers, which usually name public people and places. Identifiers (emails, phone numbers, card numbers…) still block. Both lists are Helm values, so this changes without code changes. |
+| Names, places and nationalities don't block responses | They're still blocked or masked in prompts, which protects what users send. Blocking them in responses blocked most ordinary answers, which usually name public people and places. Identifiers (emails, phone numbers, card numbers…) still block. Both lists are Helm values, so this changes without code changes. |
 | Pin LiteLLM 1.105.1 | The guardrail depends on behaviour of this release: how the file is loaded, the streaming setting, and which hooks run. |
 
 ## Limitations
 
 - A response that names a private person or their address isn't blocked,
   because `PERSON` and `LOCATION` don't block responses. The user's own details
-  are still masked in prompts.
+  are still checked in prompts.
+- With blocking (the default), one chat message containing PII blocks every
+  later turn of that chat, because chat clients resend the whole conversation.
 - `DATE_TIME` is ignored, so a date of birth on its own isn't masked or blocked.
-- The model sees placeholders such as `<EMAIL_ADDRESS>`, so it can't use the
-  masked details, for example to write a reply addressed to that email.
+- With masking, the model sees placeholders such as `<EMAIL_ADDRESS>`, so it
+  can't use the masked details, for example to write a reply addressed to that
+  email.
 - Presidio's English model is used, so PII in other languages is detected less
   reliably.
 - Tool-call arguments aren't checked.

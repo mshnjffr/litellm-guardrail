@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds the PII service image, makes it available to the cluster, and installs
-# or upgrades the Helm release. Re-run after any change.
+# or upgrades the Helm release. Re-run after any change. Extra arguments go to
+# helm, e.g. ./scripts/deploy.sh --set piiService.promptAction=mask
 set -eu
 
 # Work from the repo root, wherever the script is run from.
@@ -31,7 +32,7 @@ helm dependency build charts/litellm-guardrail
 helm upgrade --install "$RELEASE" charts/litellm-guardrail \
   --namespace "$NAMESPACE" --create-namespace \
   --set-file guardrailCode=guardrail/pii_guardrail.py \
-  --wait --timeout 10m
+  --wait --timeout 10m "$@"
 
 # On upgrades, restart so pods pick up a rebuilt image (same tag) and new guardrail code.
 if [ "$already_installed" = true ]; then

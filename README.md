@@ -1,9 +1,10 @@
 # LiteLLM PII guardrail
 
 A [custom LiteLLM guardrail](https://docs.litellm.ai/docs/proxy/guardrails/custom_guardrail)
-for PII. PII in a prompt is masked before it reaches the model
-(`jane@example.com` becomes `<EMAIL_ADDRESS>`), and a model response containing
-PII, streamed or not, including reasoning output, is blocked. A separate Python
+for PII. A prompt containing PII is blocked before it reaches the model, or
+masked if you prefer (`jane@example.com` becomes `<EMAIL_ADDRESS>`), and a model
+response containing PII, streamed or not, including reasoning output, is
+blocked. A separate Python
 service built on [Microsoft Presidio](https://microsoft.github.io/presidio/)
 decides what counts as PII and what to do, and the guardrail calls it over HTTP. Both run in Kubernetes, deployed
 with Helm, and the service exposes Prometheus metrics. Everything runs locally:
@@ -105,15 +106,19 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
   -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Spell the word cat backwards. Reply with only the result."}]}'
 ```
 
-PII in the prompt is masked before it reaches the model, so the model only sees
-the placeholder. Ask it to repeat the prompt:
+A prompt containing PII is blocked before it reaches the model (HTTP 400):
 
 ```sh
-curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+curl -s -w '\nHTTP %{http_code}\n' localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Repeat exactly the text between the quotes, and nothing else: \"my email is jane.doe@example.com\""}]}'
-# ... "content": "... my email is <EMAIL_ADDRESS>" ...
+  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "My email is jane.doe@example.com. Write me a short bio."}]}'
+# {"error": {"message": "PII detected in prompt: EMAIL_ADDRESS, URL", ...}}
+# HTTP 400
 ```
+
+Presidio's URL recognizer also matches the address's domain, so a blocked email
+usually lists `URL` too. To mask prompts instead, see
+[Masking prompts instead of blocking them](#masking-prompts-instead-of-blocking-them).
 
 PII the model writes is blocked, and a streamed response sends only the error:
 
@@ -124,8 +129,8 @@ curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MA
 # data: {"error": {"message": "PII detected in model response: EMAIL_ADDRESS, ...", ...}}
 ```
 
-Prompts are masked for every Presidio entity type except `DATE_TIME` (a date or
-time isn't PII on its own), including names, places and nationalities.
+Prompts are checked for every Presidio entity type except `DATE_TIME` (a date
+or time isn't PII on its own), including names, places and nationalities.
 Responses are blocked for identifiers such as emails, phone numbers and card
 numbers, but not for names, places or nationalities (`PERSON`, `LOCATION`,
 `NRP`). Those appear in most ordinary answers ("Rayleigh scattering, explained by
@@ -145,8 +150,11 @@ Ask it directly:
 ```sh
 curl -s localhost:8000/v1/analyze -H 'Content-Type: application/json' \
   -d '{"texts": ["Call John Smith on +44 20 7946 0958"], "source": "request"}'
-# {"action": "mask", "entities": ["PERSON", "PHONE_NUMBER"], "texts": ["Call <PERSON> on <PHONE_NUMBER>"]}
+# {"action": "block", "entities": ["PERSON", "PHONE_NUMBER"], "texts": null}
 ```
+
+With `promptAction: mask`, the same request returns the masked text:
+`{"action": "mask", ..., "texts": ["Call <PERSON> on <PHONE_NUMBER>"]}`.
 
 ### Prometheus metrics
 
@@ -190,7 +198,7 @@ Then try these in the **Query** page (the Graph tab shows them over time):
 
 | Query | Shows |
 | --- | --- |
-| `sum by (source, decision) (pii_service_requests_total)` | Prompts masked or allowed, and responses blocked or allowed |
+| `sum by (source, decision) (pii_service_requests_total)` | Prompts and responses, by decision: allowed, masked or blocked |
 | `sum by (entity_type) (pii_service_entities_detected_total)` | Which PII types turn up |
 | `sum by (guardrail_name, hook_type, status) (litellm_guardrail_requests_total)` | Guardrail calls, as LiteLLM sees them |
 | `histogram_quantile(0.95, sum by (le, guardrail_name) (rate(litellm_guardrail_latency_seconds_bucket[5m])))` | 95th-percentile guardrail latency |
@@ -207,13 +215,39 @@ The detection settings are in [`charts/litellm-guardrail/values.yaml`](charts/li
 
 ```yaml
 piiService:
+  promptAction: block    # or mask: what to do with a prompt containing PII
   scoreThreshold: 0.4    # Presidio confidence needed to count as PII (0-1)
   ignoredEntities: [DATE_TIME]                       # never masked or blocked
-  responseIgnoredEntities: [PERSON, LOCATION, NRP]   # masked in prompts, but don't block responses
+  responseIgnoredEntities: [PERSON, LOCATION, NRP]   # count in prompts, but don't block responses
 ```
 
 Edit them and run `./scripts/deploy.sh` again. The model and guardrail settings
 are in the same file, under `litellm.proxy_config`.
+
+### Masking prompts instead of blocking them
+
+By default, a prompt containing PII is blocked. To mask the PII instead and send
+the rest of the prompt to the model, set `promptAction: mask` in `values.yaml`
+and run `./scripts/deploy.sh`. To try it without editing the file:
+
+```sh
+./scripts/deploy.sh --set piiService.promptAction=mask
+```
+
+That lasts until the next `./scripts/deploy.sh` without it. Masking suits chat
+clients: they resend the whole conversation every turn, so with blocking, one
+message containing PII blocks every later turn until you start a new chat. With
+masking, the model only sees the placeholder. Ask it to repeat the prompt:
+
+```sh
+curl -s localhost:4000/v1/chat/completions -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "deepseek-r1:8b", "messages": [{"role": "user", "content": "Repeat exactly the text between the quotes, and nothing else: \"my email is jane.doe@example.com\""}]}'
+# ... "content": "... my email is <EMAIL_ADDRESS>" ...
+```
+
+PII split across message parts (`"jane@"` + `"example.com"`) can't be masked in
+place, so that prompt is still blocked. Responses are blocked either way.
 
 ## Run the tests
 
@@ -257,10 +291,13 @@ kubectl delete namespace litellm
 ## Limitations
 
 - A response that names a private person or their address isn't blocked,
-  because `PERSON` and `LOCATION` don't block responses. Prompts are still masked.
+  because `PERSON` and `LOCATION` don't block responses. Prompts are still checked.
 - `DATE_TIME` is ignored, so a date of birth on its own isn't masked or blocked.
-- The model sees placeholders such as `<EMAIL_ADDRESS>`, so it can't use the
-  masked details.
+- With blocking (the default), one chat message containing PII blocks every
+  later turn of that chat, because chat clients resend the whole conversation.
+  Start a new chat, or mask prompts instead.
+- With masking, the model sees placeholders such as `<EMAIL_ADDRESS>`, so it
+  can't use the masked details.
 - Detection uses Presidio's English model.
 - Tool-call arguments aren't checked.
 

@@ -1,8 +1,8 @@
 """
 LiteLLM custom guardrails for PII. The PII service (Presidio) makes the
-decision; these guardrails send it the text over HTTP and enforce it: PII in a
-prompt is masked before it reaches the model, and a model response or
-reasoning containing PII is blocked.
+decision; these guardrails send it the text over HTTP and enforce it: a prompt
+containing PII is blocked, or masked before it reaches the model, and a model
+response or reasoning containing PII is blocked.
 """
 
 from dataclasses import dataclass
@@ -77,12 +77,10 @@ class PIIServiceGuardrail(CustomGuardrail):
 
 class PIIGuardrail(PIIServiceGuardrail):
     """
-    Masks PII in the prompt (pre_call), and blocks the call if the model
-    response (post_call) contains PII.
-
-    Masking rather than blocking prompts matters for chat: clients resend the
-    whole conversation each turn, so a blocked message would block every later
-    turn too. A masked message is masked again each time, so the chat carries on.
+    Checks the prompt (pre_call) and the model response (post_call), and
+    enforces the PII service's decision. A prompt containing PII is blocked, or
+    masked if the service is set to mask prompts; a response containing PII is
+    blocked.
     """
 
     # Makes LiteLLM hold a streamed response until it has been fully scanned,
